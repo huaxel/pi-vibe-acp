@@ -1,0 +1,53 @@
+{
+  "name": "@juanbenjumea/pi-vibe-acp",
+  "version": "0.1.0",
+  "description": "Mistral Vibe delegation for Pi: run Vibe's own agent over ACP (vibe-acp) from a tool, with streaming, permission control, and token accounting.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Juan Benjumea",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "mistral",
+    "mistral-vibe",
+    "vibe-acp",
+    "acp",
+    "agent-client-protocol",
+    "delegation"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --import ./tests/resolve-hook.mjs --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit --pretty false",
+    "pack:check": "npm pack --dry-run --json",
+    "gate": "npm run typecheck && npm test && npm run pack:check",
+    "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "extensions/"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
+    "@types/node": "^22.20.4",
+    "typebox": "^1.4.7",
+    "typescript": "^5.9.3"
+  }
+}
