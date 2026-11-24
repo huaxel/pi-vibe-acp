@@ -26,7 +26,7 @@ Two independent reasons, useful separately:
   own `vibe-acp`, so they plausibly stay in the Vibe bucket — Mistral support
   could not confirm this, and their docs do not define it. Treat that as
   **unverified**: measure before relying on it
-  (see [metering](#metering-is-unverified)).
+  (see [metering](#metering-is-unverified) and [docs/metering.md](docs/metering.md)).
 
 ## Requirements
 
@@ -98,10 +98,10 @@ that to stick.
 The claim "ACP traffic stays on the Vibe allowance" comes from how requests are
 identified, not from a published rule: Vibe sends its own user agent and the
 agent is Mistral's, but Mistral's classification of "third-party harnesses" is
-server-side. Measure it against your own account before depending on it — the
-`acp_probe.py` kit in `~/projects/mistral-acp-probe` records a run and compares
-the two dashboard buckets; this extension's `details.usage` gives the token
-counts for the same experiment.
+server-side. Measure it against your own account before depending on it;
+[docs/metering.md](docs/metering.md) records what is and is not stated, the
+procedure, and the pre-change calibration. This extension's `details.usage`
+gives the token counts the experiment needs.
 
 ## Token accounting
 
@@ -128,6 +128,10 @@ npm test            # offline, against tests/fake-agent.mjs
 npm run typecheck
 npm run test:live   # real vibe-acp, spends one minimal turn
 ```
+
+`PI_VIBE_ACP_CLIENT_NAME` overrides the ACP client identity (default `pi`),
+which is the knob the metering experiment in [docs/metering.md](docs/metering.md)
+uses to test whether client identity affects billing.
 
 The offline suite drives a scripted ACP agent that can misbehave on purpose
 (unparsable frames, a dying process, a hung prompt, an unadvertised client
