@@ -31,7 +31,11 @@ Two independent reasons, useful separately:
 
 - Pi with extension support (this package declares `pi.extensions`).
 - Mistral Vibe installed, so `vibe-acp` is on `PATH`
-  (`uv tool install mistral-vibe` or the official installer).
+  (`uv tool install mistral-vibe` or the official installer). uv installs into
+  `%USERPROFILE%\.local\bin` on Windows and does not edit your shell, so add
+  that directory to `PATH` yourself. On a Python newer than 3.12, the install
+  fails building `tree-sitter` (no wheel yet): pin with
+  `uv tool install --python 3.12 mistral-vibe`.
 - Vibe signed in: run `vibe --setup` once, or export `MISTRAL_API_KEY`.
   The extension reuses Vibe's own credential store; it never reads your key.
 
