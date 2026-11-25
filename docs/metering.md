@@ -1,11 +1,10 @@
-# Verifying where ACP usage is metered
+# Where ACP usage is metered
 
-This package is useful whether or not ACP traffic stays on the Vibe allowance.
-It does not, however, prove that it does — and Mistral has not published a rule.
-This page records why the claim is uncertain and how to settle it against your
-own account.
+Mistral has confirmed the case in writing: **ACP traffic stays on the Vibe
+allowance.** This page records what was stated, why the question was open, and
+how to cross-check the answer against your own account occasionally.
 
-## What is actually stated
+## What is stated
 
 Mistral's notice of 24 November 2026: from the next billing cycle (1 December
 2026), usage made through "non-Mistral products, such as third-party coding
@@ -13,11 +12,25 @@ tools or harnesses" counts against the monthly free API allowance instead of
 the Vibe allowance, while "dedicated Vibe usage in Mistral products is
 unaffected". Both allowances stay the same size; only the bucket changes.
 
-Asked directly, Mistral support (AI agent) answered that the documentation does
-not define how third-party harnesses are classified, nor whether ACP client
-identity affects billing — so it could not confirm the case either way.
+Asked to classify ACP specifically, Mistral support answered on 25 November
+2026 (Bastien, by email):
 
-## Why ACP is the ambiguous case
+> The answer is (a): an ACP session served by vibe-acp keeps drawing from your
+> Vibe allowance after December 1. Using Mistral's own Vibe agent through ACP
+> inside another editor is allowed. The client name and version your editor
+> declares don't change that. What matters is that Vibe is the agent, so the
+> same vibe-acp session counts the same way whichever editor launched it.
+> vibe -p counts the same way: headless mode is still the Vibe CLI, so
+> scripting it doesn't move it to the API allowance. If any of your usage goes
+> through another tool that calls the models with your Vibe key directly, only
+> that part moves to the €25.50 API allowance from December 1.
+
+So the split follows **who makes the model call**, not the editor, the ACP
+client identity, or whether the CLI is interactive. It is a support statement,
+not a published rule, which is why the cross-check below is worth running
+rather than never re-examining.
+
+## Why it was the ambiguous case
 
 - `vibe-acp` is Mistral's own binary, shipped in the `mistral-vibe` package and
   documented for Zed, JetBrains, Xcode, and Neovim. The agent, its tools, and
@@ -26,14 +39,13 @@ identity affects billing — so it could not confirm the case either way.
   separate session token — and its model requests carry
   `user-agent: mistral-client-python/Mistral-Vibe/<version>`.
 - ACP `initialize` forwards the connecting client's name and version
-  (`clientInfo`), which the agent can report upstream. So a harness called
-  `pi` is visible as a third-party client even though the agent is Vibe's.
+  (`clientInfo`), which the agent can report upstream, so a harness called `pi`
+  is visible as a third-party client even though the agent is Vibe's.
 
-If Mistral classifies by client, this extension looks third-party. If it
-classifies by the serving agent, it looks in-product. The classification lives
-on their side; nothing in the client can settle it.
+The first two point at in-product and the third points at third-party. Mistral
+resolved it on the agent, not the client.
 
-## Procedure
+## Cross-check
 
 Both allowances reset on the first of the month, so a small run after the reset
 is unambiguous. The two Pro buckets differ by roughly 10×, which makes the
@@ -45,27 +57,18 @@ direction obvious even for a single turn (~12–13k input tokens).
    `details.usage.totalTokens` from the tool result. For a larger signal, run
    several turns; the token count is reported per call.
 3. **Re-read the dashboard** after it settles (minutes, occasionally longer).
-   Whichever balance moved by roughly that run's cost is the bucket ACP uses.
-4. **Repeat with a differently named client** (`PI_VIBE_ACP_CLIENT_NAME=zed`) to
-   test whether the declared identity matters.
+   The Vibe balance should have moved by roughly that run's cost. An API-balance
+   move means the classification changed and the workflow now has ~1/10 of the
+   headroom.
+4. Optionally repeat with `PI_VIBE_ACP_CLIENT_NAME=zed` to confirm the declared
+   identity still makes no difference — support says it does not.
 
-Two controls are worth running the same day:
+Controls worth running the same day if a result looks wrong:
 
 - `vibe -p "Reply with exactly: OK" --output json --trust` — headless
-  programmatic mode, still Vibe's agent, but not ACP.
+  programmatic mode, which support placed in the Vibe bucket too.
 - `vibe` in a terminal — the in-product baseline the notice explicitly keeps on
   the Vibe allowance.
-
-## Reading the result
-
-| Vibe balance moved | ACP traffic is in-product; the workflow behaves like the CLI. |
-|---|---|
-| API balance moved | ACP is classified third-party; the workflow now has ~1/10 of the headroom, and delegated turns consume the API allowance. |
-| Neither moved | The dashboard has not settled, or the split is by something else. Re-snapshot before concluding. |
-
-Snapshot the numbers daily for the first week and keep the tool results
-alongside them: usage takes time to process, so a later reconciliation could
-reclassify what the dashboard showed on day one.
 
 ## Calibration, before the change
 

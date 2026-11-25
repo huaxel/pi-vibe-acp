@@ -23,10 +23,9 @@ Two independent reasons, useful separately:
 - **Metering surface.** From 1 December 2026 Mistral counts usage made through
   "third-party coding tools or harnesses" against the monthly free API
   allowance instead of the Vibe allowance. ACP sessions are served by Mistral's
-  own `vibe-acp`, so they plausibly stay in the Vibe bucket — Mistral support
-  could not confirm this, and their docs do not define it. Treat that as
-  **unverified**: measure before relying on it
-  (see [metering](#metering-is-unverified) and [docs/metering.md](docs/metering.md)).
+  own `vibe-acp`, and Mistral has confirmed that they keep drawing from the
+  Vibe allowance whichever editor launches them
+  (see [metering](#metering) and [docs/metering.md](docs/metering.md)).
 
 ## Requirements
 
@@ -93,15 +92,19 @@ through Vibe's config mutation, which **persists** to `~/.vibe/config.toml` —
 exactly as choosing a model in Vibe's own UI does. Pass them only when you want
 that to stick.
 
-## Metering is unverified
+## Metering
 
-The claim "ACP traffic stays on the Vibe allowance" comes from how requests are
-identified, not from a published rule: Vibe sends its own user agent and the
-agent is Mistral's, but Mistral's classification of "third-party harnesses" is
-server-side. Measure it against your own account before depending on it;
-[docs/metering.md](docs/metering.md) records what is and is not stated, the
-procedure, and the pre-change calibration. This extension's `details.usage`
-gives the token counts the experiment needs.
+Mistral support confirmed in writing (25 November 2026) that a session served
+by `vibe-acp` keeps drawing from the Vibe allowance after 1 December 2026, no
+matter which editor launched it: what counts is that Vibe is the agent, not the
+ACP client name or version the editor declares. Headless `vibe -p` counts the
+same way. Only a tool that calls the models with your Vibe key directly moves
+to the API allowance.
+
+The classification still happens server-side, so [docs/metering.md](docs/metering.md)
+keeps a cheap monthly cross-check: one sized turn after the reset, compared
+against both balances. This extension's `details.usage` supplies the token
+counts that check needs.
 
 ## Token accounting
 

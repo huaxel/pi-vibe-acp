@@ -18,3 +18,5 @@ Vibe's own agent over ACP (`vibe-acp`), plus a `/vibe` doctor command.
 - Actionable failures: missing `vibe-acp` explains installation, missing
   credentials explain `vibe --setup`, timeouts say the turn may still be live.
 - Offline test suite against a scripted ACP agent, plus a live smoke test.
+- Metering: Mistral confirmed that `vibe-acp` sessions stay on the Vibe
+  allowance whichever editor launches them (see `docs/metering.md`).
