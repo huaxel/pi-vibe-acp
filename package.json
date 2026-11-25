@@ -23,12 +23,14 @@
     "typecheck": "tsc --noEmit --pretty false",
     "pack:check": "npm pack --dry-run --json",
     "gate": "npm run typecheck && npm test && npm run pack:check",
-    "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts"
+    "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts",
+    "prepublishOnly": "npm run gate"
   },
   "files": [
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
+    "docs/",
     "extensions/"
   ],
   "pi": {
@@ -49,5 +51,16 @@
     "@types/node": "^22.20.4",
     "typebox": "^1.4.7",
     "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/huaxel/pi-vibe-acp.git"
+  },
+  "homepage": "https://github.com/huaxel/pi-vibe-acp#readme",
+  "bugs": {
+    "url": "https://github.com/huaxel/pi-vibe-acp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
