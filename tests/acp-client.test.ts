@@ -82,9 +82,11 @@ test("refuses client methods it never advertised", async () => {
   try {
     await client.initialize({ name: "pi", version: "test" });
     // The agent asks for a method this client never advertised; wait for its
-    // record of the refusal rather than racing the teardown.
+    // record of the refusal rather than racing the teardown. Only the marker
+    // matters: new URL(".", import.meta.url).pathname is POSIX-shaped
+    // (/C:/... on Windows) and never exists there, so waiting on it hung.
     await waitFor(
-      () => existsSync(`${new URL(".", import.meta.url).pathname}`) && existsSync(refusalMarker(agent)),
+      () => existsSync(refusalMarker(agent)),
       "the agent to record the refused client method",
     );
   } finally {
