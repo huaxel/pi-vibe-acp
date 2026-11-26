@@ -143,8 +143,14 @@ Vibe kept a different model or mode, the tool result says so.
 npm install
 npm test            # offline, against tests/fake-agent.mjs
 npm run typecheck
-npm run test:live   # real vibe-acp, spends one minimal turn
+npm run test:live   # real vibe-acp, spends three minimal turns
 ```
+
+`test:live` costs three turns because it checks the paths the offline suite can
+only prove against a scripted agent: a plain answer, an approved tool call
+(asserted on the command's own output, which a denied call cannot produce), and a
+mid-turn cancel that must land inside the abort grace window and leave no child
+process behind.
 
 `PI_VIBE_ACP_CLIENT_NAME` overrides the ACP client identity (default `pi`),
 which is the knob the metering experiment in [docs/metering.md](docs/metering.md)
