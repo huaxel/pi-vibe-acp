@@ -6,7 +6,7 @@
  * dependency that Pi would have to install alongside it.
  *
  * Method names and payload shapes follow schema-v1.16.0 (protocolVersion 1),
- * which is what `vibe-acp` 3.1.4 advertises.
+ * which is what `vibe-acp` 3.1.x advertises (verified against 3.1.5).
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -142,4 +142,12 @@ export function readUsageMeta(update: AcpSessionUpdate): AcpUsageUpdateMeta | un
   const raw = update.fieldMeta ?? (update as { _meta?: Record<string, unknown> })._meta;
   if (!raw || typeof raw !== "object") return undefined;
   return raw as AcpUsageUpdateMeta;
+}
+
+/** `session/close` exists in v1 only when the agent advertises it. */
+export function supportsSessionClose(init: AcpInitializeResult): boolean {
+  const sessionCapabilities = init.agentCapabilities?.sessionCapabilities;
+  if (!sessionCapabilities || typeof sessionCapabilities !== "object") return false;
+  const close = (sessionCapabilities as Record<string, unknown>).close;
+  return typeof close === "object" && close !== null;
 }

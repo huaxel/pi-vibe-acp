@@ -53,6 +53,11 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_ABORT_GRACE_MS = 5_000;
 const TERMINATE_GRACE_MS = 2_500;
 
+/** Command to spawn. A blank override means "not set", not "spawn nothing". */
+export function resolveCommand(command?: string): string {
+  return command?.trim() || "vibe-acp";
+}
+
 export type PermissionHandler = (
   request: AcpPermissionRequest,
 ) => AcpPermissionOutcome | Promise<AcpPermissionOutcome>;
@@ -113,12 +118,13 @@ export class AcpClient {
 
   constructor(options: AcpClientOptions) {
     this.options = {
-      requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-      abortGraceMs: DEFAULT_ABORT_GRACE_MS,
       ...options,
-      command: options.command ?? "vibe-acp",
+      command: resolveCommand(options.command),
       args: options.args ?? [],
       cwd: options.cwd,
+      // Explicit `undefined` must not erase the defaults a spread would overwrite.
+      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      abortGraceMs: options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS,
     };
 
     this.child = spawn(this.options.command, this.options.args, {
@@ -162,33 +168,58 @@ export class AcpClient {
     return tail ? `: ${keepTail(tail, 600)}` : "";
   }
 
-  async initialize(clientInfo: AcpImplementation): Promise<AcpInitializeResult> {
-    return this.request<AcpInitializeResult>(AGENT_METHODS.initialize, {
-      protocolVersion: PROTOCOL_VERSION,
-      // No filesystem, terminal, or MCP capabilities: the agent uses its own
-      // tools and must never route work through this client.
-      clientCapabilities: {},
-      clientInfo,
-    });
+  async initialize(
+    clientInfo: AcpImplementation,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<AcpInitializeResult> {
+    return this.request<AcpInitializeResult>(
+      AGENT_METHODS.initialize,
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        // No filesystem, terminal, or MCP capabilities: the agent uses its own
+        // tools and must never route work through this client.
+        clientCapabilities: {},
+        clientInfo,
+      },
+      options,
+    );
   }
 
-  async newSession(cwd: string): Promise<AcpSessionNewResult> {
-    return this.request<AcpSessionNewResult>(AGENT_METHODS.newSession, {
-      cwd,
-      mcpServers: [],
-    });
+  async newSession(
+    cwd: string,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<AcpSessionNewResult> {
+    return this.request<AcpSessionNewResult>(
+      AGENT_METHODS.newSession,
+      { cwd, mcpServers: [] },
+      options,
+    );
   }
 
   async setConfigOption(
     sessionId: string,
     configId: string,
     value: string | boolean,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<AcpConfigOption[] | undefined> {
     const result = await this.request<{ configOptions?: AcpConfigOption[] }>(
       AGENT_METHODS.setConfigOption,
-      { sessionId, configId, value, type: typeof value === "boolean" ? "boolean" : "select" },
+      // `type` describes the value's shape, not the option kind: ACP defines
+      // "boolean" and "id" (id is the default for string values), and agents must
+      // reject anything else with -32602.
+      { sessionId, configId, value, type: typeof value === "boolean" ? "boolean" : "id" },
+      options,
     );
     return result?.configOptions;
+  }
+
+  /** For agents that expose modes only through the dedicated session method. */
+  async setSessionMode(
+    sessionId: string,
+    modeId: string,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<void> {
+    await this.request<unknown>(AGENT_METHODS.setSessionMode, { sessionId, modeId }, options);
   }
 
   /**
@@ -256,12 +287,21 @@ export class AcpClient {
 
       if (options.signal) {
         const onAbort = () => {
-          if (options.cancelMethod) {
+          // Without a cancel notification the agent cannot acknowledge anything,
+          // so a grace window would only delay the caller.
+          if (!options.cancelMethod) {
+            settle(() => reject(new AcpAbortError(method)));
+            return;
+          }
+          try {
             this.send({
               jsonrpc: "2.0",
               method: options.cancelMethod,
               params: options.cancelParams,
             });
+          } catch (error) {
+            settle(() => reject(error as Error));
+            return;
           }
           pending.abortGraceTimer = setTimeout(() => {
             settle(() => reject(new AcpAbortError(method)));

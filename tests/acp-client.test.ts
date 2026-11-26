@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
-import { AcpClient, AcpTimeoutError } from "../extensions/lib/acp-client.js";
-import { fakeAgent, waitFor } from "./helpers.js";
+import { AcpClient, AcpTimeoutError, resolveCommand } from "../extensions/lib/acp-client.js";
+import { supportsSessionClose } from "../extensions/lib/protocol.js";
+import { fakeAgent, delay, waitFor } from "./helpers.js";
 
 function refusalMarker(agent: ReturnType<typeof fakeAgent>): string {
   const reportPath = agent.args[agent.args.indexOf("--report") + 1];
@@ -109,6 +110,56 @@ test("dispose terminates an agent that never answers", async () => {
 
   assert.ok(elapsed < 10_000, `dispose took ${elapsed}ms`);
   await assert.rejects(client.request("initialize", {}), /connection is closed/);
+  agent.cleanup();
+});
+
+test("session/close counts as advertised only when its capability is an object", () => {
+  const init = (sessionCapabilities: unknown) =>
+    ({ protocolVersion: 1, agentCapabilities: { sessionCapabilities } }) as Parameters<
+      typeof supportsSessionClose
+    >[0];
+  assert.equal(supportsSessionClose(init({ close: {} })), true);
+  assert.equal(supportsSessionClose(init({ close: null })), false);
+  assert.equal(supportsSessionClose(init({})), false);
+  assert.equal(supportsSessionClose(init(undefined)), false);
+});
+
+test("a blank command override falls back to vibe-acp instead of crashing spawn", () => {
+  assert.equal(resolveCommand(undefined), "vibe-acp");
+  assert.equal(resolveCommand(""), "vibe-acp");
+  assert.equal(resolveCommand("   "), "vibe-acp");
+  assert.equal(resolveCommand(" /opt/vibe-acp "), "/opt/vibe-acp");
+});
+
+test("an abort waits out a real grace window instead of giving up at once", async () => {
+  const agent = fakeAgent("ignore-cancel");
+  const client = connect(agent, { requestTimeoutMs: 60_000 });
+  const controller = new AbortController();
+
+  const pending = client.prompt("fake-session", "never answered", {
+    signal: controller.signal,
+  });
+  pending.catch(() => undefined);
+
+  try {
+    controller.abort();
+
+    // No abortGraceMs passed: the default window must still be there. A spread
+    // that overwrites the default with `undefined` would settle in ~0ms.
+    const outcome = await Promise.race([
+      pending.then(
+        () => "settled",
+        () => "settled",
+      ),
+      delay(400).then(() => "still waiting"),
+    ]);
+    assert.equal(outcome, "still waiting");
+  } finally {
+    await client.dispose();
+  }
+
+  await assert.rejects(pending, /cancelled|disposed|agent exited/);
+  assert.equal(agent.report().cancelReceived, true);
   agent.cleanup();
 });
 

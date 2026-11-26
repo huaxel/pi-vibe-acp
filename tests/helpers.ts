@@ -11,7 +11,15 @@ export type FakeBehavior =
   | "hang"
   | "exit-mid"
   | "slow"
-  | "ask-fs";
+  | "ask-fs"
+  | "ask-always"
+  | "ask-always-only"
+  | "modes-only"
+  | "hang-init"
+  | "ignore-cancel"
+  | "usage-partial"
+  | "config-stale"
+  | "no-close";
 
 export interface FakeAgent {
   /** Spawn spec: run the fake agent under the test runner's own node. */
@@ -27,9 +35,15 @@ export interface FakeAgent {
 export interface FakeReport {
   behavior: string;
   methods: string[];
-  initialize: { clientInfo?: { name?: string; version?: string }; protocolVersion?: number } | null;
+  initialize: {
+    clientInfo?: { name?: string; version?: string };
+    clientCapabilities?: Record<string, unknown>;
+    protocolVersion?: number;
+  } | null;
   newSession: { cwd?: string; mcpServers?: unknown[] } | null;
   configOptions: Array<{ configId: string; value: string }>;
+  /** Mode ids received through the dedicated session/set_mode method. */
+  modes: string[];
   permissionOutcomes: string[];
   cancelReceived: boolean;
   closeSession: boolean;

@@ -87,7 +87,12 @@ Two layers, and the safer one is the default:
 
 The client advertises no filesystem, terminal, elicitation, or MCP
 capabilities, so Vibe uses its own tools and cannot borrow Pi's authority. If an
-agent asks anyway, the request is refused with JSON-RPC `-32601`.
+agent asks anyway, the request is refused with JSON-RPC `-32601`. A test asserts
+`clientCapabilities` stays empty.
+
+`ask` always selects the once-only grant when Vibe offers one, whatever order
+Vibe lists the options in; if a session-wide grant is all that is on offer, the
+dialog says so instead of promising "once".
 
 ## What changes in your Vibe install
 
@@ -115,6 +120,9 @@ counts that check needs.
 Vibe's counts land in the tool result's `details.usage` (input/output/total,
 plus cache reads when reported), deliberately **not** in Pi's `usage` field: Pi
 would add them to its own session totals and bill them against the wrong model.
+Reports that carry counts without a total are kept rather than dropped, and
+`details.applied` reports the value Vibe confirmed, not the one requested; if
+Vibe kept a different model or mode, the tool result says so.
 
 ## Limits
 
@@ -123,7 +131,9 @@ would add them to its own session totals and bill them against the wrong model.
 - A turn that exceeds `timeoutSeconds` fails with a message saying Vibe may
   still be working; Pi kills the process when the tool call ends.
 - Cancellation sends `session/cancel`, waits up to 5s for the agent to stop
-  cleanly, then tears the process down.
+  cleanly, then tears the process down. Cancelling during startup (before the
+  turn begins) is honoured too, and reports a cancelled run rather than a
+  timeout.
 - One session per call. There is no resume: Vibe's journals live in
   `~/.vibe`, not in Pi's session tree.
 

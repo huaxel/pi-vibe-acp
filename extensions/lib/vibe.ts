@@ -1,6 +1,8 @@
-import { AcpAbortError, AcpClient, AcpError, AcpTimeoutError } from "./acp-client.js";
+import { statSync } from "node:fs";
+import { AcpAbortError, AcpClient, AcpTimeoutError } from "./acp-client.js";
 import {
   readUsageMeta,
+  supportsSessionClose,
   type AcpConfigOption,
   type AcpPermissionOutcome,
   type AcpPermissionRequest,
@@ -35,9 +37,17 @@ export interface VibeRunResult extends VibeProgress {
   cancelled: boolean;
   agent?: { name?: string; version?: string };
   applied: { mode?: string; model?: string; thinking?: string };
+  /** Options Vibe accepted but set to something other than what was requested. */
+  adjusted?: VibeAdjustment[];
   thoughts: number;
   durationMs: number;
   truncated: boolean;
+}
+
+export interface VibeAdjustment {
+  option: "mode" | "model" | "thinking";
+  requested: string;
+  applied: string;
 }
 
 export interface VibeRunOptions {
@@ -55,6 +65,8 @@ export interface VibeRunOptions {
   clientName?: string;
   clientVersion?: string;
   signal?: AbortSignal;
+  /** Grace window for an agent to acknowledge a cancel. Defaults to 5s. */
+  abortGraceMs?: number;
   onProgress?: (progress: VibeProgress) => void;
   /** Called for each permission request when `permission` is "ask". */
   confirm?: (request: { title: string; message: string }) => Promise<boolean>;
@@ -75,6 +87,7 @@ export interface VibeDoctorResult {
  * accounting never claims tokens it did not buy.
  */
 export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResult> {
+  assertDirectory(options.cwd);
   const startedAt = Date.now();
   const permission = options.permission ?? "deny";
   const timeoutMs = clampTimeout(options.timeoutMs);
@@ -87,7 +100,8 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
   const toolCalls: string[] = [];
   let lastProgressAt = 0;
 
-  const client = createClient(options, permission, {
+  let client: AcpClient | undefined;
+  const hooks: { onUpdate: (update: AcpSessionUpdate) => void } = {
     onUpdate: (update) => {
       const kind = update.sessionUpdate;
       if (kind === "agent_message_chunk") {
@@ -119,17 +133,20 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
       }
       if (kind === "usage_update") {
         const meta = readUsageMeta(update);
-        if (meta?.totalTokens) {
-          usage = {
-            inputTokens: meta.promptTokens ?? 0,
-            outputTokens: meta.completionTokens ?? 0,
+        if (meta) {
+          // Some agents report counts without a total; keep the report instead of
+          // discarding it.
+          usage = mergeUsage(usage, {
+            inputTokens: meta.promptTokens,
+            outputTokens: meta.completionTokens,
             totalTokens: meta.totalTokens,
             cachedReadTokens: meta.cachedTokens,
-          };
+          });
         }
+        return;
       }
     },
-  });
+  };
 
   function emit(): void {
     if (!options.onProgress) return;
@@ -141,25 +158,42 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
 
   let sessionId: string | undefined;
   let agent: VibeRunResult["agent"];
+  let applied: VibeRunResult["applied"] = {};
+  let adjusted: VibeAdjustment[] = [];
   let authMethodCount = 0;
+  let closeSupported = false;
 
   try {
-    const init = await client.initialize({
-      name: clientName,
-      title: "Pi",
-      version: options.clientVersion ?? "unknown",
-    });
+    // Already cancelled: report it without starting an agent just to kill it.
+    if (options.signal?.aborted) throw new AcpAbortError("initialize");
+    client = createClient(options, permission, hooks);
+    const init = await client.initialize(
+      {
+        name: clientName,
+        title: "Pi",
+        version: options.clientVersion ?? "unknown",
+      },
+      { signal: options.signal },
+    );
     agent = { name: init.agentInfo?.name, version: init.agentInfo?.version };
     authMethodCount = init.authMethods?.length ?? 0;
+    closeSupported = supportsSessionClose(init);
 
-    const session: AcpSessionNewResult = await client.newSession(options.cwd);
+    const session: AcpSessionNewResult = await client.newSession(options.cwd, {
+      signal: options.signal,
+    });
     sessionId = session.sessionId;
 
-    const applied = await applyConfig(client, session, {
-      mode: options.mode,
-      model: options.model,
-      thinking: options.thinking,
-    });
+    ({ applied, adjusted } = await applyConfig(
+      client,
+      session,
+      {
+        mode: options.mode,
+        model: options.model,
+        thinking: options.thinking,
+      },
+      { signal: options.signal },
+    ));
 
     let stopReason = "end_turn";
     let cancelled = false;
@@ -171,14 +205,7 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
       stopReason = result.stopReason ?? "end_turn";
       cancelled = stopReason === "cancelled";
       const finalUsage = result.usage;
-      if (finalUsage && finalUsage.totalTokens) {
-        usage = {
-          inputTokens: finalUsage.inputTokens,
-          outputTokens: finalUsage.outputTokens,
-          totalTokens: finalUsage.totalTokens,
-          cachedReadTokens: finalUsage.cachedReadTokens,
-        };
-      }
+      if (finalUsage) usage = mergeUsage(usage, finalUsage);
     } catch (error) {
       if (!(error instanceof AcpAbortError)) throw error;
       stopReason = "cancelled";
@@ -194,19 +221,38 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
       cancelled,
       agent,
       applied,
+      adjusted: adjusted.length ? adjusted : undefined,
       thoughts,
       durationMs: Date.now() - startedAt,
       truncated: textTruncated,
     };
   } catch (error) {
+    // A cancel before the turn starts has no text or stop reason to report, but
+    // it is still a cancellation, not a failure.
+    if (error instanceof AcpAbortError) {
+      return {
+        text: text.trim(),
+        toolCalls,
+        usage,
+        sessionId,
+        stopReason: "cancelled",
+        cancelled: true,
+        agent,
+        applied,
+        adjusted: adjusted.length ? adjusted : undefined,
+        thoughts,
+        durationMs: Date.now() - startedAt,
+        truncated: textTruncated,
+      };
+    }
     // Startup failures (missing binary, no session, a refused option) deserve
     // the same translated message as a failed turn.
     throw explainTurnError(error, authMethodCount);
   } finally {
-    if (sessionId) {
-      await client.closeSession(sessionId).catch(() => undefined);
+    if (sessionId && closeSupported) {
+      await client?.closeSession(sessionId).catch(() => undefined);
     }
-    await client.dispose();
+    await client?.dispose();
   }
 }
 
@@ -214,20 +260,26 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
 export async function readVibeDoctor(
   options: Pick<VibeRunOptions, "cwd" | "command" | "args" | "env" | "clientName" | "clientVersion">,
 ): Promise<VibeDoctorResult> {
-  const client = new AcpClient({
-    command: options.command,
-    args: options.args,
-    cwd: options.cwd,
-    env: options.env,
-  });
+  assertDirectory(options.cwd);
 
+  let client: AcpClient | undefined;
   let sessionId: string | undefined;
+  let closeSupported = false;
+  let authMethodCount = 0;
   try {
+    client = new AcpClient({
+      command: options.command,
+      args: options.args,
+      cwd: options.cwd,
+      env: options.env,
+    });
     const init = await client.initialize({
       name: options.clientName ?? "pi",
       title: "Pi",
       version: options.clientVersion ?? "unknown",
     });
+    closeSupported = supportsSessionClose(init);
+    authMethodCount = init.authMethods?.length ?? 0;
     const session = await client.newSession(options.cwd);
     sessionId = session.sessionId;
     return {
@@ -240,12 +292,25 @@ export async function readVibeDoctor(
       authMethods: (init.authMethods ?? []).map((method) => method.id),
       configOptions: session.configOptions ?? [],
     };
+  } catch (error) {
+    // Same translation as a run: a missing binary needs the install hint here too.
+    throw explainTurnError(error, authMethodCount);
   } finally {
-    if (sessionId) {
-      await client.closeSession(sessionId).catch(() => undefined);
+    if (sessionId && closeSupported) {
+      await client?.closeSession(sessionId).catch(() => undefined);
     }
-    await client.dispose();
+    await client?.dispose();
   }
+}
+
+/** A missing cwd makes spawn fail with ENOENT, which reads as a missing binary. */
+function assertDirectory(cwd: string): void {
+  try {
+    if (statSync(cwd).isDirectory()) return;
+  } catch {
+    throw new VibeAcpError(`working directory "${cwd}" does not exist`);
+  }
+  throw new VibeAcpError(`working directory "${cwd}" is not a directory`);
 }
 
 function createClient(
@@ -258,6 +323,7 @@ function createClient(
     args: options.args,
     cwd: options.cwd,
     env: options.env,
+    abortGraceMs: options.abortGraceMs,
     onSessionUpdate: (_sessionId, update) => hooks.onUpdate(update),
     onPermissionRequest: (request) => decidePermission(request, permission, options.confirm),
   });
@@ -271,7 +337,10 @@ async function decidePermission(
   if (permission === "deny") return { outcome: "cancelled" };
 
   const options = request.options ?? [];
-  const allow = options.find((option) => ALLOW_KINDS.has(option.kind ?? ""));
+  // Prefer the narrowest grant: an agent that lists allow_always first must not
+  // get a session-wide approval behind a dialog that promised "once".
+  const allowOnce = options.find((option) => option.kind === "allow_once");
+  const allow = allowOnce ?? options.find((option) => ALLOW_KINDS.has(option.kind ?? ""));
   if (!allow) return { outcome: "cancelled" };
 
   if (permission === "approve") {
@@ -281,22 +350,25 @@ async function decidePermission(
   if (!confirm) return { outcome: "cancelled" };
   const title = sanitize(request.toolCall?.title ?? "").trim() || "a tool call";
   const detail = options.find((option) => DENY_KINDS.has(option.kind ?? ""));
+  const scope = allowOnce
+    ? "Approve once?"
+    : `Approve for this session? ("${allow.name ?? allow.optionId}" is the only grant on offer)`;
   const approved = await confirm({
     title: "Vibe wants to act",
-    message: `${title}\n\nApprove once?${detail ? ` (declining picks "${detail.name ?? detail.optionId}")` : ""}`,
+    message: `${title}\n\n${scope}${detail ? ` (declining picks "${detail.name ?? detail.optionId}")` : ""}`,
   });
-  return approved
-    ? { outcome: "selected", optionId: allow.optionId }
-    : { outcome: "cancelled" };
+  return approved ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" };
 }
 
 async function applyConfig(
   client: AcpClient,
   session: AcpSessionNewResult,
   wanted: { mode?: string; model?: string; thinking?: string },
-): Promise<{ mode?: string; model?: string; thinking?: string }> {
-  const applied: { mode?: string; model?: string; thinking?: string } = {};
-  const updates: Array<[string, string]> = [];
+  requestOptions: { signal?: AbortSignal } = {},
+): Promise<{ applied: VibeRunResult["applied"]; adjusted: VibeAdjustment[] }> {
+  const applied: VibeRunResult["applied"] = {};
+  const adjusted: VibeAdjustment[] = [];
+  const updates: Array<[VibeAdjustment["option"], string]> = [];
   if (wanted.mode) updates.push(["mode", wanted.mode]);
   if (wanted.model) updates.push(["model", wanted.model]);
   if (wanted.thinking) updates.push(["thinking", wanted.thinking]);
@@ -306,10 +378,12 @@ async function applyConfig(
 
   for (const [id, value] of updates) {
     const option = configOptions.find((candidate) => candidate.id === id);
-    const allowed =
-      id === "mode" && !option
-        ? modes.map((mode) => mode.id)
-        : (option?.options ?? []).map((choice) => choice.value);
+    // Mode has two homes in ACP: a `mode` config option (what Vibe exposes), or
+    // the dedicated session/set_mode + modes list. Route to whichever exists.
+    const viaSessionMode = id === "mode" && !option && modes.length > 0;
+    const allowed = viaSessionMode
+      ? modes.map((mode) => mode.id)
+      : (option?.options ?? []).map((choice) => choice.value);
 
     if (allowed.length > 0 && !allowed.includes(value)) {
       throw new VibeAcpError(
@@ -317,12 +391,58 @@ async function applyConfig(
       );
     }
 
-    const result = await client.setConfigOption(session.sessionId, id, value);
-    if (result) configOptions = result;
-    applied[id as "mode" | "model" | "thinking"] = value;
+    if (viaSessionMode) {
+      await client.setSessionMode(session.sessionId, value, requestOptions);
+      applied[id] = value;
+    } else {
+      const result = await client.setConfigOption(
+        session.sessionId,
+        id,
+        value,
+        requestOptions,
+      );
+      if (result) configOptions = result;
+      // The agent may adjust the value it accepted; its response is authoritative,
+      // so report what actually stuck rather than what was asked for, and record
+      // the difference so the caller can say so.
+      const confirmed = result?.find((candidate) => candidate.id === id)?.currentValue;
+      const actual = typeof confirmed === "string" ? confirmed : value;
+      applied[id] = actual;
+      if (actual !== value) adjusted.push({ option: id, requested: value, applied: actual });
+    }
   }
 
-  return applied;
+  return { applied, adjusted };
+}
+
+/**
+ * Usage arrives as reports carrying a total, per-side counts, or both. Vibe's are
+ * session-cumulative, so the newest per-side counts win; fields a report omits
+ * keep their last value, and the total never shrinks.
+ */
+function mergeUsage(
+  previous: AcpUsage | undefined,
+  next: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    cachedReadTokens?: number;
+  },
+): AcpUsage | undefined {
+  const inputTokens = next.inputTokens ?? previous?.inputTokens ?? 0;
+  const outputTokens = next.outputTokens ?? previous?.outputTokens ?? 0;
+  const totalTokens = Math.max(
+    next.totalTokens ?? 0,
+    inputTokens + outputTokens,
+    previous?.totalTokens ?? 0,
+  );
+  if (!totalTokens) return previous;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedReadTokens: next.cachedReadTokens ?? previous?.cachedReadTokens,
+  };
 }
 
 /** Failure with a message written for the model and the user, not a stack trace. */

@@ -24,6 +24,7 @@ const report = {
   initialize: null,
   newSession: null,
   configOptions: [],
+  modes: [],
   permissionOutcomes: [],
   cancelReceived: false,
   closeSession: false,
@@ -89,6 +90,17 @@ function update(sessionId, payload) {
 function requestPermission(sessionId, promptId) {
   const id = 900 + ++permissionSequence;
   pendingPermission = { id, promptId, sessionId };
+  const once = { optionId: "allow_once", name: "Allow once", kind: "allow_once" };
+  const always = { optionId: "allow_always", name: "Always allow", kind: "allow_always" };
+  const reject = { optionId: "reject_once", name: "Reject", kind: "reject_once" };
+  // Real agents are free to order these however they like; the client must not
+  // read that order as a preference.
+  const options =
+    behavior === "ask-always"
+      ? [always, once, reject]
+      : behavior === "ask-always-only"
+        ? [always, reject]
+        : [once, reject];
   send({
     jsonrpc: "2.0",
     id,
@@ -96,10 +108,7 @@ function requestPermission(sessionId, promptId) {
     params: {
       sessionId,
       toolCall: { toolCallId: "tool-1", title: "bash: ls -la", kind: "execute", status: "pending" },
-      options: [
-        { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
-        { optionId: "reject_once", name: "Reject", kind: "reject_once" },
-      ],
+      options,
     },
   });
 }
@@ -109,6 +118,16 @@ function finishTurn(promptId, sessionId) {
     sessionUpdate: "agent_message_chunk",
     content: { type: "text", text: "world" },
   });
+  if (behavior === "usage-partial") {
+    // Counts but no total, and no usage on the response: the client must sum them.
+    update(sessionId, {
+      sessionUpdate: "usage_update",
+      _meta: { promptTokens: 900, completionTokens: 100, cachedTokens: 0 },
+    });
+    pendingPromptId = null;
+    respond(promptId, { stopReason: "end_turn" });
+    return;
+  }
   update(sessionId, {
     sessionUpdate: "usage_update",
     used: 1200,
@@ -130,7 +149,7 @@ function handlePrompt(message) {
     process.exit(3);
   }
 
-  if (behavior === "hang") {
+  if (behavior === "hang" || behavior === "ignore-cancel") {
     pendingPromptId = message.id;
     pendingPromptSession = sessionId;
     return;
@@ -206,10 +225,15 @@ function handle(message) {
   switch (message.method) {
     case "initialize":
       report.initialize = message.params;
+      if (behavior === "hang-init") return;
       respond(message.id, {
         protocolVersion: 1,
         agentInfo: { name: "@mistralai/mistral-vibe", title: "Mistral Vibe", version: "3.1.4-fake" },
-        agentCapabilities: { loadSession: true },
+        agentCapabilities: {
+          loadSession: true,
+          // "no-close" models an agent that never advertised session/close.
+          ...(behavior === "no-close" ? {} : { sessionCapabilities: { close: {} } }),
+        },
         authMethods: [{ id: "browser-auth", name: "Sign in" }],
       });
       if (behavior === "ask-fs") {
@@ -235,12 +259,28 @@ function handle(message) {
             { id: "auto-approve", name: "Auto approve" },
           ],
         },
-        configOptions: options,
+        // "modes-only" models an agent that never turned mode into a config
+        // option; ACP keeps the dedicated session/set_mode for exactly this.
+        configOptions: behavior === "modes-only" ? options.filter((o) => o.id !== "mode") : options,
       });
       return;
 
+    case "session/set_mode": {
+      const { modeId } = message.params ?? {};
+      report.modes.push(modeId);
+      respond(message.id, {});
+      return;
+    }
+
     case "session/set_config_option": {
-      const { configId, value } = message.params ?? {};
+      const { configId, value, type } = message.params ?? {};
+      // ACP: `type` describes the value's shape. "boolean" for booleans, "id"
+      // for id values, and an unsupported type must be rejected with -32602.
+      const expectedType = typeof value === "boolean" ? "boolean" : "id";
+      if (type !== undefined && type !== expectedType) {
+        respondError(message.id, -32602, `unsupported value type ${JSON.stringify(type)}`);
+        return;
+      }
       const option = options.find((candidate) => candidate.id === configId);
       const allowed = (option?.options ?? []).map((choice) => choice.value);
       if (!option || !allowed.includes(value)) {
@@ -248,6 +288,12 @@ function handle(message) {
         return;
       }
       report.configOptions.push({ configId, value });
+      if (behavior === "config-stale") {
+        // The agent keeps its own value and reports it back; the client must not
+        // claim the requested value was applied.
+        respond(message.id, { configOptions: options });
+        return;
+      }
       options = options.map((candidate) =>
         candidate.id === configId ? { ...candidate, currentValue: value } : candidate,
       );
@@ -261,6 +307,8 @@ function handle(message) {
 
     case "session/cancel":
       report.cancelReceived = true;
+      // A wedged agent that ignores cancellation; the client must not hang on it.
+      if (behavior === "ignore-cancel") return;
       if (slowTimer) {
         clearTimeout(slowTimer);
         slowTimer = null;
@@ -278,6 +326,10 @@ function handle(message) {
       return;
 
     case "session/close":
+      if (behavior === "no-close") {
+        respondError(message.id, -32601, "session/close unsupported");
+        return;
+      }
       report.closeSession = true;
       respond(message.id, {});
       return;

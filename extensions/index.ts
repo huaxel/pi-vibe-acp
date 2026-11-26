@@ -247,6 +247,10 @@ export function modelFacingText(result: VibeRunResult): string {
   else if (result.stopReason && result.stopReason !== "end_turn") {
     notes.push(`stopped: ${result.stopReason}`);
   }
+  // A swapped model or mode changes what the reply means; the model must see it.
+  for (const change of result.adjusted ?? []) {
+    notes.push(`vibe kept ${change.option} "${change.applied}" (requested "${change.requested}")`);
+  }
   const usage = formatUsage(result.usage);
   const duration = formatDuration(result.durationMs);
   const applied = [result.applied.model, result.applied.mode, result.applied.thinking].filter(Boolean);
