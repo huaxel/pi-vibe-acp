@@ -13,6 +13,7 @@ import {
 import {
   readVibeDoctor,
   runVibeTask,
+  stripAnsi,
   VIBE_PERMISSIONS,
   VibeAcpError,
   type VibeRunResult,
@@ -47,8 +48,8 @@ const vibeParameters = Type.Object({
   permission: Type.Optional(
     StringEnum(VIBE_PERMISSIONS, {
       description:
-        "How to answer Vibe's tool-permission requests: deny (default, read-only-ish tasks only), " +
-        "ask (prompt for each request; requires an interactive session), or approve (allow every request).",
+        "How to answer Vibe's tool-permission requests: deny (default), ask (interactive), or approve. " +
+        "This does not restrict tools Vibe's own policy runs without asking.",
     }),
   ),
   timeoutSeconds: Type.Optional(
@@ -83,7 +84,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use vibe when the user asks for Mistral Vibe specifically, or when a task should run in Vibe's own agent loop instead of this session's tools.",
       "Give vibe a self-contained prompt: it cannot see this conversation, and it edits the working tree itself.",
-      "Set vibe's permission to \"approve\" only when the task needs writes or commands; the default denies Vibe's tool requests and suits read-only investigation.",
+      "Permission only governs requests sent to Pi, not actions Vibe approves itself. Use mode \"ask\" for permission prompts; do not assume deny is a read-only sandbox.",
       "Read vibe's token counts from its details, not as this session's usage; those tokens are billed to Vibe.",
     ],
     parameters: vibeParameters,
@@ -108,6 +109,8 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
+      const dialogLifetime = new AbortController();
+      const dialogSignal = signal ? AbortSignal.any([signal, dialogLifetime.signal]) : dialogLifetime.signal;
       let result: VibeRunResult;
       try {
         result = await runVibeTask({
@@ -136,12 +139,14 @@ export default function (pi: ExtensionAPI) {
           },
           confirm:
             permission === "ask" && ctx.hasUI
-              ? async ({ title, message }) => ctx.ui.confirm(title, message)
+              ? ({ title, message }) => ctx.ui.confirm(title, message, { signal: dialogSignal })
               : undefined,
         });
       } catch (error) {
         if (error instanceof VibeAcpError) throw new Error(error.message);
         throw error;
+      } finally {
+        dialogLifetime.abort();
       }
 
       const details: VibeToolDetails = {
@@ -176,8 +181,6 @@ export default function (pi: ExtensionAPI) {
 
     renderResult(result, { expanded, isPartial }, theme, context) {
       const details = result.details as VibeToolDetails | undefined;
-      const error = (result as { isError?: boolean }).isError === true;
-
       if (isPartial) {
         const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
         text.setText(theme.fg("warning", statusSummary(details, true)));
@@ -185,8 +188,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       const lines: string[] = [];
-      const status = statusSummary(details, false);
-      lines.push(theme.fg(error ? "error" : "success", `${error ? "✗" : "✓"} ${status}`));
+      const status = context.isError ? "failed" : statusSummary(details, false);
+      lines.push(theme.fg(context.isError ? "error" : "success", `${context.isError ? "✗" : "✓"} ${status}`));
 
       if (details?.toolCalls.length) {
         const shown = expanded ? details.toolCalls : details.toolCalls.slice(0, 3);
@@ -196,7 +199,9 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const text = details?.text ?? "";
+      const text = context.isError
+        ? stripAnsi(result.content.map((item) => item.type === "text" ? item.text : "").filter(Boolean).join("\n"))
+        : details?.text ?? "";
       if (text) {
         const limit = expanded ? 4_000 : 400;
         const body = text.length > limit ? `${text.slice(0, limit).trimEnd()}…` : text;

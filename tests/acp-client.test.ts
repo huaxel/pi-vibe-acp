@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
-import { AcpClient, AcpTimeoutError, resolveCommand } from "../extensions/lib/acp-client.js";
+import { AcpAbortError, AcpClient, AcpTimeoutError, resolveCommand } from "../extensions/lib/acp-client.js";
 import { supportsSessionClose } from "../extensions/lib/protocol.js";
 import { fakeAgent, delay, waitFor } from "./helpers.js";
 
@@ -161,6 +161,25 @@ test("an abort waits out a real grace window instead of giving up at once", asyn
   await assert.rejects(pending, /cancelled|disposed|agent exited/);
   assert.equal(agent.report().cancelReceived, true);
   agent.cleanup();
+});
+
+test("a turn deadline cannot interrupt the cancellation grace window", async (t) => {
+  const agent = fakeAgent("ignore-cancel");
+  t.after(agent.cleanup);
+  const client = connect(agent, { abortGraceMs: 150 });
+  const controller = new AbortController();
+  try {
+    const session = await client.newSession(agent.dir);
+    const pending = client.prompt(session.sessionId, "never answered", {
+      signal: controller.signal,
+      timeoutMs: 50,
+    });
+    controller.abort();
+    await assert.rejects(pending, AcpAbortError);
+  } finally {
+    await client.dispose();
+  }
+  assert.equal(agent.report().cancelReceived, true);
 });
 
 test("a request after dispose fails instead of writing to a dead pipe", async () => {

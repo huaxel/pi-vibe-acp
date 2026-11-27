@@ -183,6 +183,33 @@ test("names a session-wide grant when that is all the agent offers", async () =>
   agent.cleanup();
 });
 
+test("does not ask for approval of an unidentified tool call", async (t) => {
+  const agent = fakeAgent("ask-unknown-tool");
+  t.after(agent.cleanup);
+  const confirm = t.mock.fn(async () => true);
+  await runVibeTask({
+    cwd: agent.dir,
+    prompt: "anything",
+    ...spawnSpec(agent),
+    permission: "ask",
+    confirm,
+  });
+  assert.equal(confirm.mock.callCount(), 0);
+  assert.deepEqual(agent.report().permissionOutcomes, ["cancelled"]);
+});
+
+test("never turns client approval into a permanent Vibe grant", async (t) => {
+  const agent = fakeAgent("ask-permanent-only");
+  t.after(agent.cleanup);
+  await runVibeTask({
+    cwd: agent.dir,
+    prompt: "anything",
+    ...spawnSpec(agent),
+    permission: "approve",
+  });
+  assert.deepEqual(agent.report().permissionOutcomes, ["cancelled"]);
+});
+
 test("uses session/set_mode for agents that expose modes but no mode option", async () => {
   const agent = fakeAgent("modes-only");
   const result = await runVibeTask({

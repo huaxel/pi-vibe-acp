@@ -76,23 +76,24 @@ and session options (no prompt, no token spend).
 
 ## Permissions
 
-Two layers, and the safer one is the default:
+Vibe's own policy (`mode`) and its configured allowlists decide which
+actions run without asking Pi. For example, `accept-edits` can write files
+without sending a request. **`permission: "deny"` cancels the requests Pi
+receives; it does not make the session read-only.** Use OS-level isolation
+when you need to enforce filesystem restrictions.
 
-1. **Vibe's own policy** (`mode`) decides which of Vibe's tool calls need
-   approval at all. Vibe's `~/.vibe/config.toml` allowlists still apply.
-2. **This client** answers each permission request Vibe sends. The default
-   `deny` cancels every request, so a delegated turn can investigate and read
-   but not act. Use `ask` to approve interactively, or `approve` for autonomous
-   work in a directory you trust.
+For interactive review, set `mode: "ask"` and `permission: "ask"`. Use
+`permission: "approve"` only when you trust Vibe to act without your review.
 
 The client advertises no filesystem, terminal, elicitation, or MCP
 capabilities, so Vibe uses its own tools and cannot borrow Pi's authority. If an
 agent asks anyway, the request is refused with JSON-RPC `-32601`. A test asserts
 `clientCapabilities` stays empty.
 
-`ask` always selects the once-only grant when Vibe offers one, whatever order
-Vibe lists the options in; if a session-wide grant is all that is on offer, the
-dialog says so instead of promising "once".
+`ask` declines unidentified tool calls instead of asking you to approve them
+blindly. Both `ask` and `approve` prefer a once-only grant, fall back only to
+known Vibe session grants, and never select a permanent grant. The dialog shows
+which scope you are approving.
 
 ## What changes in your Vibe install
 
@@ -148,9 +149,9 @@ npm run test:live   # real vibe-acp, spends three minimal turns
 
 `test:live` costs three turns because it checks the paths the offline suite can
 only prove against a scripted agent: a plain answer, an approved tool call
-(asserted on the command's own output, which a denied call cannot produce), and a
-mid-turn cancel that must land inside the abort grace window and leave no child
-process behind.
+(checked via a permission callback and a marker file written in a scratch
+directory), and a mid-turn cancel that must start after assistant text arrives,
+finish within the abort grace window, and leave no direct child process behind.
 
 `PI_VIBE_ACP_CLIENT_NAME` overrides the ACP client identity (default `pi`),
 which is the knob the metering experiment in [docs/metering.md](docs/metering.md)

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.1] - 2026-11-27
+
+- Clarify that client permission policy only affects requests Vibe sends to Pi.
+  Resolve permission requests to their tool titles, decline unidentified actions,
+  and never select permanent grants.
+- Show failed tool calls and their error messages in Pi. Let the cancellation
+  grace window take precedence over a turn timeout once cancellation starts.
+- The three-turn `npm run test:live` now checks an approval and its filesystem
+  effect, and requires the mid-turn cancellation to start after text arrives.
+- The changelog collapses the first release under one dated `0.1.0` heading.
+  Everything it listed had shipped, so `[Unreleased]` was claiming published
+  work was still pending.
+
 ## [0.1.0] - 2026-11-26
 
 Initial release: a `vibe` tool that delegates one self-contained task to Mistral

@@ -1,6 +1,6 @@
 {
   "name": "@juanbenjumea/pi-vibe-acp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Mistral Vibe delegation for Pi: run Vibe's own agent over ACP (vibe-acp) from a tool, with streaming, permission control, and token accounting.",
   "type": "module",
   "license": "MIT",

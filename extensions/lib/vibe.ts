@@ -22,8 +22,13 @@ const MAX_TIMEOUT_MS = 3_600_000;
 const TEXT_LIMIT = 60_000;
 const PROGRESS_INTERVAL_MS = 120;
 
-const ALLOW_KINDS = new Set(["allow_once", "allow_always"]);
-const DENY_KINDS = new Set(["reject_once", "reject_always"]);
+// Vibe also uses allow_always for permanent grants. Only fall back to known
+// session-scoped IDs, never to an arbitrary option of that kind.
+const SESSION_GRANT_IDS = new Set([
+  "allow_always",
+  "allow_session_exact",
+  "allow_session_directory_recursive",
+]);
 
 export interface VibeProgress {
   text: string;
@@ -98,11 +103,14 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
   let thoughts = 0;
   let usage: AcpUsage | undefined;
   const toolCalls: string[] = [];
+  const toolTitles = new Map<string, string>();
   let lastProgressAt = 0;
 
   let client: AcpClient | undefined;
-  const hooks: { onUpdate: (update: AcpSessionUpdate) => void } = {
-    onUpdate: (update) => {
+  const hooks = {
+    sessionId: () => sessionId,
+    toolTitle: (id: string) => toolTitles.get(id),
+    onUpdate: (update: AcpSessionUpdate) => {
       const kind = update.sessionUpdate;
       if (kind === "agent_message_chunk") {
         const chunk = sanitize(update.content?.text ?? "");
@@ -125,6 +133,7 @@ export async function runVibeTask(options: VibeRunOptions): Promise<VibeRunResul
       }
       if (kind === "tool_call" || kind === "tool_call_update") {
         const title = sanitize(update.title ?? "").trim();
+        if (title && update.toolCallId) toolTitles.set(update.toolCallId, title);
         if (title && !toolCalls.includes(title)) {
           toolCalls.push(title);
           emit();
@@ -316,7 +325,11 @@ function assertDirectory(cwd: string): void {
 function createClient(
   options: VibeRunOptions,
   permission: VibePermission,
-  hooks: { onUpdate: (update: AcpSessionUpdate) => void },
+  hooks: {
+    sessionId: () => string | undefined;
+    toolTitle: (id: string) => string | undefined;
+    onUpdate: (update: AcpSessionUpdate) => void;
+  },
 ): AcpClient {
   return new AcpClient({
     command: options.command,
@@ -324,8 +337,15 @@ function createClient(
     cwd: options.cwd,
     env: options.env,
     abortGraceMs: options.abortGraceMs,
-    onSessionUpdate: (_sessionId, update) => hooks.onUpdate(update),
-    onPermissionRequest: (request) => decidePermission(request, permission, options.confirm),
+    onSessionUpdate: (sessionId, update) => {
+      if (sessionId === hooks.sessionId()) hooks.onUpdate(update);
+    },
+    onPermissionRequest: (request) => {
+      if (!request?.sessionId || request.sessionId !== hooks.sessionId() || options.signal?.aborted) {
+        return { outcome: "cancelled" };
+      }
+      return decidePermission(request, permission, options.confirm, hooks.toolTitle, options.signal);
+    },
   });
 }
 
@@ -333,6 +353,8 @@ async function decidePermission(
   request: AcpPermissionRequest,
   permission: VibePermission,
   confirm: VibeRunOptions["confirm"],
+  toolTitle: (id: string) => string | undefined,
+  signal?: AbortSignal,
 ): Promise<AcpPermissionOutcome> {
   if (permission === "deny") return { outcome: "cancelled" };
 
@@ -340,7 +362,9 @@ async function decidePermission(
   // Prefer the narrowest grant: an agent that lists allow_always first must not
   // get a session-wide approval behind a dialog that promised "once".
   const allowOnce = options.find((option) => option.kind === "allow_once");
-  const allow = allowOnce ?? options.find((option) => ALLOW_KINDS.has(option.kind ?? ""));
+  const allow = allowOnce ?? options.find(
+    (option) => option.kind === "allow_always" && SESSION_GRANT_IDS.has(option.optionId),
+  );
   if (!allow) return { outcome: "cancelled" };
 
   if (permission === "approve") {
@@ -348,16 +372,20 @@ async function decidePermission(
   }
 
   if (!confirm) return { outcome: "cancelled" };
-  const title = sanitize(request.toolCall?.title ?? "").trim() || "a tool call";
-  const detail = options.find((option) => DENY_KINDS.has(option.kind ?? ""));
+  const call = request.toolCall;
+  const title = sanitize(call?.title ?? "").trim() ||
+    (call?.toolCallId && toolTitle(call.toolCallId));
+  if (!title) return { outcome: "cancelled" };
   const scope = allowOnce
     ? "Approve once?"
-    : `Approve for this session? ("${allow.name ?? allow.optionId}" is the only grant on offer)`;
+    : `Approve for this session? ("${sanitize(allow.name ?? allow.optionId)}")`;
   const approved = await confirm({
     title: "Vibe wants to act",
-    message: `${title}\n\n${scope}${detail ? ` (declining picks "${detail.name ?? detail.optionId}")` : ""}`,
+    message: `${title}\n\n${scope}`,
   });
-  return approved ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" };
+  return approved && !signal?.aborted
+    ? { outcome: "selected", optionId: allow.optionId }
+    : { outcome: "cancelled" };
 }
 
 async function applyConfig(

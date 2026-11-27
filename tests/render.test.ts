@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import extension from "../extensions/index.js";
 import {
   formatDuration,
   formatTokens,
@@ -8,6 +10,25 @@ import {
   statusSummary,
   type VibeToolDetails,
 } from "../extensions/lib/render.js";
+
+test("renders the Pi error flag and diagnostic when tool details are missing", () => {
+  type Renderer = NonNullable<Parameters<ExtensionAPI["registerTool"]>[0]["renderResult"]>;
+  let render: Renderer | undefined;
+  const host: Pick<ExtensionAPI, "registerTool" | "registerCommand"> = {
+    registerTool: (definition) => { render = definition.renderResult as Renderer | undefined; },
+    registerCommand: () => undefined,
+  };
+  extension(host as ExtensionAPI);
+  assert.ok(render);
+  const theme = { fg: (_color: string, value: string) => value } as Theme;
+  const output = render(
+    { content: [{ type: "text", text: "vibe-acp is not installed" }], details: undefined },
+    { expanded: false, isPartial: false },
+    theme,
+    { isError: true } as Parameters<typeof render>[3],
+  ).render(80).map((line) => line.trimEnd());
+  assert.deepEqual(output, ["✗ failed", "vibe-acp is not installed"]);
+});
 
 test("formatTokens keeps small counts exact and abbreviates large ones", () => {
   assert.equal(formatTokens(0), "0");

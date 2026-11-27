@@ -293,6 +293,10 @@ export class AcpClient {
             settle(() => reject(new AcpAbortError(method)));
             return;
           }
+          // After cancellation starts, only the grace window should time out
+          // this request; the original deadline can no longer win the race.
+          if (pending.timer) clearTimeout(pending.timer);
+          pending.timer = undefined;
           try {
             this.send({
               jsonrpc: "2.0",

@@ -92,6 +92,7 @@ function requestPermission(sessionId, promptId) {
   pendingPermission = { id, promptId, sessionId };
   const once = { optionId: "allow_once", name: "Allow once", kind: "allow_once" };
   const always = { optionId: "allow_always", name: "Always allow", kind: "allow_always" };
+  const permanent = { optionId: "allow_always_permanent", name: "Always allow", kind: "allow_always" };
   const reject = { optionId: "reject_once", name: "Reject", kind: "reject_once" };
   // Real agents are free to order these however they like; the client must not
   // read that order as a preference.
@@ -99,15 +100,18 @@ function requestPermission(sessionId, promptId) {
     behavior === "ask-always"
       ? [always, once, reject]
       : behavior === "ask-always-only"
-        ? [always, reject]
-        : [once, reject];
+        ? [permanent, always, reject]
+        : behavior === "ask-permanent-only"
+          ? [permanent, reject]
+          : [once, reject];
   send({
     jsonrpc: "2.0",
     id,
     method: "session/request_permission",
     params: {
       sessionId,
-      toolCall: { toolCallId: "tool-1", title: "bash: ls -la", kind: "execute", status: "pending" },
+      // Vibe 3.1.5 sends only a reference; the title arrives in session/update.
+      toolCall: { toolCallId: behavior === "ask-unknown-tool" ? "unknown-tool" : "tool-1" },
       options,
     },
   });

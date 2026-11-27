@@ -10,14 +10,17 @@
  * agent, which is why it costs three turns instead of one:
  *
  *   1. a normal turn that answers with text;
- *   2. an approved tool call, proven by the command's output reaching the
- *      transcript (a denied tool call would produce no output at all);
+ *   2. a permission request for a specific command followed by its observable
+ *      filesystem effect in an isolated scratch directory;
  *   3. a cancel that lands inside the agent's abort grace window and leaves no
  *      child process behind.
  *
  * The doctor step costs no model turn.
  */
 import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readVibeDoctor, runVibeTask } from "../extensions/lib/vibe.js";
 
 const cwd = process.cwd();
@@ -89,34 +92,44 @@ if (!result.text) fail("Vibe returned no assistant text");
 if (result.stopReason !== "end_turn") fail(`stop reason ${result.stopReason}`);
 
 // --- 3. turn 2/3: a tool call that is actually approved and executed ------
-// The assertion is the command's own output, not the tool-call title: a denied
-// or never-executed call still emits tool_call updates, but cannot print its output.
+// Neither a tool-call title nor assistant text proves that the command ran.
 console.log("== turn 2/3: approved tool call ==");
-const toolStartedAt = Date.now();
-const toolRun = await runVibeTask({
-  cwd,
-  prompt: "Run the shell command `echo vibe-ok` and then reply with its output verbatim.",
-  permission: "approve",
-  timeoutMs: TIMEOUT_MS,
-});
-
-console.log("toolCalls:", toolRun.toolCalls);
-console.log("text:", JSON.stringify(toolRun.text));
-console.log("stopReason:", toolRun.stopReason, "wall:", `${Date.now() - toolStartedAt}ms`);
-
-if (toolRun.toolCalls.length === 0) {
-  fail("approve probe: Vibe never requested a tool call, so nothing was approved");
+const scratch = await mkdtemp(join(tmpdir(), "pi-vibe-live-"));
+const marker = "vibe-smoke-marker";
+const command = `printf '%s' vibe-ok > ${marker}`;
+let approved = false;
+try {
+  const toolRun = await runVibeTask({
+    cwd: scratch,
+    prompt: `Run this exact shell command once with the shell tool, then stop: \`${command}\``,
+    mode: "ask",
+    permission: "ask",
+    confirm: async ({ message }) => {
+      const [title, , scope] = message.split("\n");
+      // Approve only this invocation, not other commands or broader grants.
+      if ((title !== command && title !== `bash: ${command}`) || scope !== "Approve once?") return false;
+      approved = true;
+      return true;
+    },
+    timeoutMs: TIMEOUT_MS,
+  });
+  console.log("toolCalls:", toolRun.toolCalls, "stopReason:", toolRun.stopReason);
+  if (!approved) fail("approve probe: no matching once-only permission request was approved");
+  if (toolRun.stopReason !== "end_turn") fail(`approve probe: stop reason ${toolRun.stopReason}`);
+  const actual = await readFile(join(scratch, marker), "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return undefined;
+  });
+  if (actual !== "vibe-ok") fail("approve probe: the expected marker was not written");
+} finally {
+  await rm(scratch, { recursive: true, force: true });
 }
-if (!/vibe-ok/.test(toolRun.text)) {
-  fail("approve probe: the command output never reached the transcript, so the tool did not run");
-}
-if (toolRun.stopReason !== "end_turn") fail(`approve probe: stop reason ${toolRun.stopReason}`);
 
 // --- 4. turn 3/3: cancel mid-turn, then leave nothing running -------------
 console.log("== turn 3/3: mid-turn cancel ==");
 const childrenBefore = childPids();
 const controller = new AbortController();
-let sawText = false;
+let abortedOnText = false;
 let abortAt = 0;
 // Abort as soon as the agent starts answering, so the cancel lands mid-turn
 // rather than during startup. The fallback only covers an agent that stays
@@ -136,8 +149,8 @@ const cancelled = await runVibeTask({
   timeoutMs: TIMEOUT_MS,
   signal: controller.signal,
   onProgress: (progress) => {
-    if (sawText || !progress.text) return;
-    sawText = true;
+    if (abortAt !== 0 || !progress.text) return;
+    abortedOnText = true;
     doAbort();
   },
 });
@@ -155,7 +168,7 @@ console.log(
   "acknowledged in:",
   `${ackMs}ms`,
   "answered before abort:",
-  sawText,
+  abortedOnText,
 );
 if (!cancelled.cancelled) fail("cancel probe: the run was not reported as cancelled");
 if (cancelled.stopReason !== "cancelled") fail(`cancel probe: stop reason ${cancelled.stopReason}`);
@@ -163,12 +176,7 @@ if (abortAt === 0) fail("cancel probe: the abort was never sent");
 if (ackMs > ABORT_GRACE_MS) {
   fail(`cancel probe: the abort took ${ackMs}ms to land, so it sat out the grace window`);
 }
-if (!sawText) {
-  // Not fatal: the cancel still worked, it just landed during startup, which is
-  // already covered offline. Say so, because this run then did not test a
-  // mid-turn cancel.
-  console.log("note: no assistant text arrived before the abort, so the cancel landed during startup");
-}
+if (!abortedOnText) fail("cancel probe: no assistant text arrived before the fallback abort");
 
 const childrenAfter = await childrenAfterExit();
 if (!childrenBefore || !childrenAfter) {

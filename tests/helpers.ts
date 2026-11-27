@@ -14,6 +14,8 @@ export type FakeBehavior =
   | "ask-fs"
   | "ask-always"
   | "ask-always-only"
+  | "ask-permanent-only"
+  | "ask-unknown-tool"
   | "modes-only"
   | "hang-init"
   | "ignore-cancel"
