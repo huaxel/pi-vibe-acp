@@ -1,6 +1,27 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.0] - 2026-11-26
+
+Initial release: a `vibe` tool that delegates one self-contained task to Mistral
+Vibe's own agent over ACP (`vibe-acp`), plus a `/vibe` doctor command.
+
+- ACP client over stdio with newline-delimited JSON-RPC: every request settles
+  on response, timeout, abort, agent exit, or dispose — never hangs.
+- Permission control: `deny` (default), `ask` (interactive), `approve`, mapped
+  onto Vibe's tool-permission requests; no filesystem, terminal, or MCP
+  capabilities are advertised, so Vibe cannot borrow Pi's authority.
+- Session options: `mode` (Vibe approval policy), `model`, `thinking`, with a
+  clear error listing valid values when Vibe refuses one.
+- Streaming progress to the TUI, Vibe token counts in `details.usage` rather
+  than Pi's usage, 60k reply cap, 900s default turn budget, and cancellation
+  that gives the agent a grace window before teardown.
+- Actionable failures: missing `vibe-acp` explains installation, missing
+  credentials explain `vibe --setup`, timeouts say the turn may still be live.
+- Offline test suite against a scripted ACP agent, plus a live smoke test.
+- Metering: Mistral confirmed that `vibe-acp` sessions stay on the Vibe
+  allowance whichever editor launches them (see `docs/metering.md`).
+
+### Hardening before the first publish
 
 - A `cwd` that does not exist is reported as such, instead of as "vibe-acp is
   not installed": Node raises the same `ENOENT` for a bad cwd and a missing
@@ -32,24 +53,3 @@
 - `/vibe` translates startup failures (such as a missing binary) like the tool.
 - `session/close` is only called when the agent advertises
   `sessionCapabilities.close`, as ACP v1 requires.
-
-## [0.1.0]
-
-Initial release: a `vibe` tool that delegates one self-contained task to Mistral
-Vibe's own agent over ACP (`vibe-acp`), plus a `/vibe` doctor command.
-
-- ACP client over stdio with newline-delimited JSON-RPC: every request settles
-  on response, timeout, abort, agent exit, or dispose — never hangs.
-- Permission control: `deny` (default), `ask` (interactive), `approve`, mapped
-  onto Vibe's tool-permission requests; no filesystem, terminal, or MCP
-  capabilities are advertised, so Vibe cannot borrow Pi's authority.
-- Session options: `mode` (Vibe approval policy), `model`, `thinking`, with a
-  clear error listing valid values when Vibe refuses one.
-- Streaming progress to the TUI, Vibe token counts in `details.usage` rather
-  than Pi's usage, 60k reply cap, 900s default turn budget, and cancellation
-  that gives the agent a grace window before teardown.
-- Actionable failures: missing `vibe-acp` explains installation, missing
-  credentials explain `vibe --setup`, timeouts say the turn may still be live.
-- Offline test suite against a scripted ACP agent, plus a live smoke test.
-- Metering: Mistral confirmed that `vibe-acp` sessions stay on the Vibe
-  allowance whichever editor launches them (see `docs/metering.md`).
