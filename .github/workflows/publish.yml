@@ -55,6 +55,10 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
+      # `npm publish` runs the package's own `prepublishOnly` (npm run gate), so
+      # the publish job needs the devDependencies the `verify` job installed in
+      # its own checkout. Skipping this fails with `tsc: not found` (exit 127).
+      - run: npm ci
       - name: Refuse to republish an existing version
         run: |
           set -euo pipefail
