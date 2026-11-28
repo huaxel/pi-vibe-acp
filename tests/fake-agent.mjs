@@ -29,6 +29,10 @@ const report = {
   permissionOutcomes: [],
   cancelReceived: false,
   closeSession: false,
+  /** Client tools this client advertised, and what it answered for them. */
+  clientCapabilities: null,
+  clientToolCalls: [],
+  clientToolResults: [],
   /** Prompts that arrived while another prompt was still pending. */
   overlaps: 0,
   unexpectedClientMethods: [],
@@ -78,6 +82,22 @@ let pendingPermission = null;
 let slowTimer = null;
 let turnCount = 0;
 const outboundRequests = new Map();
+/** Responses we are still waiting for, keyed by request id. */
+const pendingClientRequests = new Map();
+let clientRequestSequence = 7_000;
+
+/**
+ * Ask the client to act and wait for its answer. An unanswered request simply
+ * stays pending, which is what an agent delegating file or shell work looks like
+ * while the client decides how to run it.
+ */
+function clientRequest(method, params) {
+  const id = ++clientRequestSequence;
+  outboundRequests.set(id, method);
+  const promise = new Promise((resolve) => pendingClientRequests.set(id, resolve));
+  send({ jsonrpc: "2.0", id, method, params });
+  return promise;
+}
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const respond = (id, result) => send({ jsonrpc: "2.0", id, result });
@@ -98,6 +118,30 @@ function requestPermission(sessionId, promptId) {
   const always = { optionId: "allow_always", name: "Always allow", kind: "allow_always" };
   const permanent = { optionId: "allow_always_permanent", name: "Always allow", kind: "allow_always" };
   const reject = { optionId: "reject_once", name: "Reject", kind: "reject_once" };
+  // What Vibe 3.1.5 actually sends for a path outside the working directory:
+  // the concrete pattern lives in the option metadata, not in the tool call.
+  const requirement = {
+    required_permissions: [
+      {
+        scope: "outside_directory",
+        invocation_pattern: "/etc/hostname",
+        session_pattern: "vibe-path:exact:/etc/hostname",
+        label: "outside workdir (/etc/hostname)",
+      },
+    ],
+  };
+  const sessionExact = {
+    optionId: "allow_session_exact",
+    name: "Allow this file only for this session",
+    kind: "allow_always",
+    _meta: requirement,
+  };
+  const permanentExact = {
+    optionId: "allow_permanent_exact",
+    name: "Always allow this file",
+    kind: "allow_always",
+    _meta: requirement,
+  };
   // Real agents are free to order these however they like; the client must not
   // read that order as a preference.
   const options =
@@ -107,7 +151,9 @@ function requestPermission(sessionId, promptId) {
         ? [permanent, always, reject]
         : behavior === "ask-permanent-only"
           ? [permanent, reject]
-          : [once, reject];
+          : behavior === "ask-path"
+            ? [once, sessionExact, permanentExact, reject]
+            : [once, reject];
   send({
     jsonrpc: "2.0",
     id,
@@ -156,6 +202,52 @@ function handlePrompt(message) {
     .join("");
   report.prompts.push(promptText);
   turnCount += 1;
+
+  if (behavior === "client-tools") {
+    // Delegates the two things this client advertises, exactly as Vibe does:
+    // a full-file write, then a command through create/wait/output/release.
+    void (async () => {
+      const write = await clientRequest("fs/write_text_file", {
+        sessionId,
+        path: "note.txt",
+        content: "written by the client\n",
+      });
+      report.clientToolResults.push({ method: "fs/write_text_file", ...write });
+
+      const create = await clientRequest("terminal/create", {
+        sessionId,
+        command: "printf",
+        args: ["%s", "hello"],
+        cwd: null,
+        env: [{ name: "GREETING", value: "hi" }],
+      });
+      report.clientToolResults.push({ method: "terminal/create", ...create });
+      const terminalId = create.result?.terminalId ?? null;
+
+      const wait = await clientRequest("terminal/wait_for_exit", { sessionId, terminalId });
+      report.clientToolResults.push({ method: "terminal/wait_for_exit", ...wait });
+      const output = await clientRequest("terminal/output", { sessionId, terminalId });
+      report.clientToolResults.push({ method: "terminal/output", ...output });
+      const released = await clientRequest("terminal/release", { sessionId, terminalId });
+      report.clientToolResults.push({ method: "terminal/release", ...released });
+
+      update(sessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text:
+            `write=${write.error ? "denied" : "ok"} ` +
+            `exit=${wait.result?.exitCode} ` +
+            `out=${String(output.result?.output ?? "").trim()}`,
+        },
+      });
+      respond(message.id, {
+        stopReason: "end_turn",
+        usage: { inputTokens: 12, outputTokens: 6, totalTokens: 18 },
+      });
+    })();
+    return;
+  }
 
   if (behavior === "provider-multi") {
     update(sessionId, {
@@ -269,6 +361,14 @@ function handle(message) {
   report.methods.push(message.method ?? `response:${message.id}`);
 
   if (message.id !== undefined && message.method === undefined) {
+    if (pendingClientRequests.has(message.id)) {
+      const resolve = pendingClientRequests.get(message.id);
+      pendingClientRequests.delete(message.id);
+      outboundRequests.delete(message.id);
+      resolve({ result: message.result, error: message.error ?? null });
+      maybeExit();
+      return;
+    }
     if (outboundRequests.has(message.id)) {
       const method = outboundRequests.get(message.id);
       outboundRequests.delete(message.id);
@@ -291,6 +391,7 @@ function handle(message) {
   switch (message.method) {
     case "initialize":
       report.initialize = message.params;
+      report.clientCapabilities = message.params?.clientCapabilities ?? null;
       if (behavior === "hang-init") return;
       respond(message.id, {
         protocolVersion: 1,

@@ -142,7 +142,7 @@ test("a startup failure is translated instead of leaking the raw error", async (
   agent.cleanup();
 });
 
-test("prefers the once-only grant when the agent offers several", async () => {
+test("grants the session scope the dialog promises, so the same action stops asking", async () => {
   const agent = fakeAgent("ask-always");
   const prompts: string[] = [];
 
@@ -157,8 +157,34 @@ test("prefers the once-only grant when the agent offers several", async () => {
     },
   });
 
-  assert.equal(agent.report().permissionOutcomes[0], "selected:allow_once");
-  assert.match(prompts[0] ?? "", /Approve once\?/);
+  // Taking the once-only grant here would put the identical dialog back in
+  // front of the user on the next request for the same pattern.
+  assert.equal(agent.report().permissionOutcomes[0], "selected:allow_always");
+  assert.match(prompts[0] ?? "", /Approve for the rest of this session\?/);
+  assert.doesNotMatch(prompts[0] ?? "", /Approve once\?/);
+  agent.cleanup();
+});
+
+test("shows the pattern a path grant covers and prefers the session-scoped one", async () => {
+  const agent = fakeAgent("ask-path");
+  const prompts: string[] = [];
+
+  await runVibeTask({
+    cwd: agent.dir,
+    prompt: "read the hostname",
+    ...spawnSpec(agent),
+    permission: "ask",
+    confirm: async ({ message }) => {
+      prompts.push(message);
+      return true;
+    },
+  });
+
+  assert.equal(agent.report().permissionOutcomes[0], "selected:allow_session_exact");
+  // Vibe describes the requirement only in option metadata; without it the
+  // dialog cannot say what "approve" would cover beyond "bash: ls -la".
+  assert.match(prompts[0] ?? "", /outside workdir \(\/etc\/hostname\)/);
+  assert.match(prompts[0] ?? "", /Allow this file only for this session/);
   agent.cleanup();
 });
 
@@ -178,7 +204,7 @@ test("names a session-wide grant when that is all the agent offers", async () =>
   });
 
   assert.equal(agent.report().permissionOutcomes[0], "selected:allow_always");
-  assert.match(prompts[0] ?? "", /for this session/);
+  assert.match(prompts[0] ?? "", /Approve for the rest of this session\?/);
   assert.doesNotMatch(prompts[0] ?? "", /Approve once\?/);
   agent.cleanup();
 });
@@ -208,6 +234,18 @@ test("never turns client approval into a permanent Vibe grant", async (t) => {
     permission: "approve",
   });
   assert.deepEqual(agent.report().permissionOutcomes, ["cancelled"]);
+});
+
+test("approve answers with the session grant so Vibe stops asking", async (t) => {
+  const agent = fakeAgent("ask-always");
+  t.after(agent.cleanup);
+  await runVibeTask({
+    cwd: agent.dir,
+    prompt: "anything",
+    ...spawnSpec(agent),
+    permission: "approve",
+  });
+  assert.deepEqual(agent.report().permissionOutcomes, ["selected:allow_always"]);
 });
 
 test("uses session/set_mode for agents that expose modes but no mode option", async () => {

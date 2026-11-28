@@ -60,10 +60,22 @@ automatically available in `/model`.
   the live `vibe-acp` session and send only the incremental delta, computing
   per-turn token deltas from Vibe's session-cumulative usage counters. A branch
   switch, compaction, or `/vibe reset` starts a fresh session cleanly.
-- **Interactive permissions**: in Pi's TUI, permission requests default to
-  `ask` (using Pi's confirm dialog); in headless/print mode they default to
-  `deny`. Override with `/vibe mode`, `/vibe permission`, or env vars
+- **Permissions like Pi's own tools**: a provider turn does not open a dialog
+  per action. Requests default to `approve`, the same posture Pi takes for its
+  own tool calls; `ask` restores a dialog per action pattern, and `deny` refuses
+  them. Set it with `/vibe mode`, `/vibe permission`, or the env vars
   `PI_VIBE_ACP_MODE` / `PI_VIBE_ACP_PERMISSION`.
+- **Vibe's own tool loop**: Vibe decides and executes tool work with its own
+  tools, so Pi's tool inventory is not forwarded. Pi sends the project
+  instructions (AGENTS.md, skills, cwd) and a note stating that Pi supplies no
+  tools. Pi's tool list, MCP inventory, Pi-tool rules ("always pass a reasoning
+  phrase to bash", codemode batching) and Pi's docs index are dropped, because
+  the model cannot act on any of it and it buries the tools Vibe really has.
+
+What you see in Pi is Vibe's text. Its tool calls are not Pi tool calls, so they
+appear as a status-bar line while a turn runs rather than as `bash`/`read`/`edit`
+blocks. If you want Pi to own the tool loop — every action rendered and approved
+by Pi — use `pi-claude-code`-style providers; ACP agents bring their own.
 
 Commands:
 - `/vibe` — print agent identity, protocol version, provider settings, warm session status, and session options (no prompt, no token spend).
@@ -90,7 +102,7 @@ Pi's conversation.
 |---|---|---|
 | `prompt` | — | Task for Vibe. Required. |
 | `cwd` | current dir | Working directory for the Vibe session. A leading `@` is stripped. |
-| `permission` | `deny` | How to answer Vibe's tool-permission requests: `deny`, `ask` (prompt per request, needs a UI), `approve`. |
+| `permission` | `approve` | How to answer Vibe's tool-permission requests: `approve` (no dialog), `ask` (prompt per pattern, needs a UI), `deny`. |
 | `mode` | Vibe's config | Vibe approval policy for the session: `ask`, `accept-edits`, `smart-approve`, `auto-approve`. |
 | `model` | Vibe's config | Vibe model alias, e.g. `mistral-large-4-0`. |
 | `thinking` | Vibe's config | `off`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -107,18 +119,45 @@ without sending a request. **`permission: "deny"` cancels the requests Pi
 receives; it does not make the session read-only.** Use OS-level isolation
 when you need to enforce filesystem restrictions.
 
-For interactive review, set `mode: "ask"` and `permission: "ask"`. Use
-`permission: "approve"` only when you trust Vibe to act without your review.
+Provider turns default to `permission: "approve"`, the same posture as Pi's own
+tools: Pi does not open a dialog before every tool call, so Vibe's turns do not
+either. `deny` is available when you want every request refused.
 
-The client advertises no filesystem, terminal, elicitation, or MCP
-capabilities, so Vibe uses its own tools and cannot borrow Pi's authority. If an
+For interactive review, set `mode: "ask"` and `permission: "ask"`. Each dialog
+names the pattern the approval covers, and approving it takes Vibe's
+session-scoped grant for that pattern, so the same action does not ask twice.
+
+## Delegating Vibe's actions to Pi (opt-in, inert on 3.1.x)
+
+`PI_VIBE_ACP_CLIENT_TOOLS=1` advertises `fs.writeTextFile` and `terminal` at
+`initialize`, so an agent that delegates its file and shell work runs it through
+Pi's `write` and `bash` tools instead: Pi's approvals, Pi's sandbox, Pi's
+rendering. The request is parked, emitted as a real Pi tool call, and answered
+only when Pi reports the result, which resumes the same Vibe turn.
+
+`vibe-acp` 3.1.5 **does not use it**. Its harness runs file and shell tools
+against a native executor that has no client mode, and no setting enables one,
+so Vibe keeps writing and running commands itself however the client advertises
+(this was verified against the live agent: the turn reports no tool calls, and
+the file appears with Vibe's own tool activity). Advertising is inert, not
+harmful: the smoke test asserts a turn still completes and still produces its
+file either way. The flag does not auto-approve Vibe-native tools: Vibe's own
+permission requests still follow `/vibe permission` and the configured policy.
+The flag exists so a future agent that does delegate gets Pi's tools with no
+code change; the path is covered offline against a spec-conformant fake agent.
+
+Delegation reads are deliberately excluded. ACP has no "read only this much"
+contract and Pi's `read` truncates at 50 KB, so content truncated on the way to
+the model could be written back over the real file.
+
+Without the flag the client advertises no filesystem, terminal, elicitation, or
+MCP capabilities, so Vibe uses its own tools and cannot borrow Pi's authority. If an
 agent asks anyway, the request is refused with JSON-RPC `-32601`. A test asserts
 `clientCapabilities` stays empty.
 
 `ask` declines unidentified tool calls instead of asking you to approve them
-blindly. Both `ask` and `approve` prefer a once-only grant, fall back only to
-known Vibe session grants, and never select a permanent grant. The dialog shows
-which scope you are approving.
+blindly. Both `ask` and `approve` prefer a session grant and never select a
+permanent one, which would rewrite your Vibe config.
 
 ## What changes in your Vibe install
 

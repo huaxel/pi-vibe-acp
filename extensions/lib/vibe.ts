@@ -4,6 +4,7 @@ import {
   readUsageMeta,
   supportsSessionClose,
   type AcpConfigOption,
+  type AcpPermissionOption,
   type AcpPermissionOutcome,
   type AcpPermissionRequest,
   type AcpSessionNewResult,
@@ -22,13 +23,17 @@ const MAX_TIMEOUT_MS = 3_600_000;
 const TEXT_LIMIT = 60_000;
 const PROGRESS_INTERVAL_MS = 120;
 
-// Vibe also uses allow_always for permanent grants. Only fall back to known
-// session-scoped IDs, never to an arbitrary option of that kind.
-const SESSION_GRANT_IDS = new Set([
-  "allow_always",
+// Which grants last for this session only. Vibe sends `allow_always` (one
+// requirement pattern), `allow_session_exact`, and
+// `allow_session_directory_recursive`; the permanent variants
+// (`allow_always_permanent`, `allow_permanent_*`) rewrite the user's Vibe
+// config and are never selected from an editor dialog. Narrowest first: a
+// grant on one path must not silently widen to its directory.
+const SESSION_GRANT_IDS = [
   "allow_session_exact",
   "allow_session_directory_recursive",
-]);
+  "allow_always",
+] as const;
 
 export interface VibeProgress {
   text: string;
@@ -359,12 +364,11 @@ export async function decidePermission(
   if (permission === "deny") return { outcome: "cancelled" };
 
   const options = request.options ?? [];
-  // Prefer the narrowest grant: an agent that lists allow_always first must not
-  // get a session-wide approval behind a dialog that promised "once".
-  const allowOnce = options.find((option) => option.kind === "allow_once");
-  const allow = allowOnce ?? options.find(
-    (option) => option.kind === "allow_always" && SESSION_GRANT_IDS.has(option.optionId),
-  );
+  // Prefer a session grant over a once-only one. Vibe remembers the pattern a
+  // session grant covers, so approving an action stops the next one from
+  // asking; the dialog names that scope instead of promising "once".
+  const grant = pickSessionGrant(options);
+  const allow = grant ?? options.find((option) => option.kind === "allow_once");
   if (!allow) return { outcome: "cancelled" };
 
   if (permission === "approve") {
@@ -376,16 +380,35 @@ export async function decidePermission(
   const title = sanitize(call?.title ?? "").trim() ||
     (call?.toolCallId && toolTitle(call.toolCallId));
   if (!title) return { outcome: "cancelled" };
-  const scope = allowOnce
-    ? "Approve once?"
-    : `Approve for this session? ("${sanitize(allow.name ?? allow.optionId)}")`;
+  // Vibe sends the request with only a toolCallId, so the concrete pattern it
+  // wants ("outside workdir (/etc/hostname)") only exists in the option's
+  // metadata. Show it: it is what the approval actually covers.
+  const scope = grant
+    ? `Approve for the rest of this session? ("${sanitize(grant.name ?? grant.optionId)}")`
+    : "Approve once?";
   const approved = await confirm({
     title: "Vibe wants to act",
-    message: `${title}\n\n${scope}`,
+    message: [title, ...permissionLabels(allow), scope].join("\n\n"),
   });
   return approved && !signal?.aborted
     ? { outcome: "selected", optionId: allow.optionId }
     : { outcome: "cancelled" };
+}
+
+function pickSessionGrant(
+  options: readonly AcpPermissionOption[],
+): AcpPermissionOption | undefined {
+  for (const id of SESSION_GRANT_IDS) {
+    const match = options.find((option) => option.optionId === id);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function permissionLabels(option: AcpPermissionOption): string[] {
+  return (option._meta?.required_permissions ?? [])
+    .map((requirement) => sanitize(requirement.label ?? "").trim())
+    .filter((label) => label.length > 0);
 }
 
 export async function applyConfig(

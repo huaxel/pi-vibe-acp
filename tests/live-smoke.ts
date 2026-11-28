@@ -105,16 +105,19 @@ try {
     mode: "ask",
     permission: "ask",
     confirm: async ({ message }) => {
-      const [title, , scope] = message.split("\n");
-      // Approve only this invocation, not other commands or broader grants.
-      if ((title !== command && title !== `bash: ${command}`) || scope !== "Approve once?") return false;
+      const [title, ...rest] = message.split("\n\n");
+      const scope = rest.at(-1) ?? "";
+      // Approve only this command's own pattern: a session grant on it, never a
+      // permanent one, and never a request about something else.
+      const ownPattern = title === command || title === `bash: ${command}`;
+      if (!ownPattern || !/^Approve for the rest of this session\? \(".*"\)$/.test(scope)) return false;
       approved = true;
       return true;
     },
     timeoutMs: TIMEOUT_MS,
   });
   console.log("toolCalls:", toolRun.toolCalls, "stopReason:", toolRun.stopReason);
-  if (!approved) fail("approve probe: no matching once-only permission request was approved");
+  if (!approved) fail("approve probe: no matching session-scoped permission request was approved");
   if (toolRun.stopReason !== "end_turn") fail(`approve probe: stop reason ${toolRun.stopReason}`);
   const actual = await readFile(join(scratch, marker), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;

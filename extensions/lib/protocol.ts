@@ -26,7 +26,76 @@ export const AGENT_METHODS = {
 export const CLIENT_METHODS = {
   requestPermission: "session/request_permission",
   sessionUpdate: "session/update",
+  /**
+   * Client tools. An agent calls these only when the client advertises the
+   * matching capability at `initialize`; otherwise the agent uses its own.
+   */
+  fsReadTextFile: "fs/read_text_file",
+  fsWriteTextFile: "fs/write_text_file",
+  terminalCreate: "terminal/create",
+  terminalOutput: "terminal/output",
+  terminalWaitForExit: "terminal/wait_for_exit",
+  terminalKill: "terminal/kill",
+  terminalRelease: "terminal/release",
 } as const;
+
+/** Which client tools this client can execute. Omitted parts are not advertised. */
+export interface AcpClientCapabilities {
+  fs?: { readTextFile?: boolean; writeTextFile?: boolean };
+  terminal?: boolean;
+}
+
+export interface AcpReadTextFileParams {
+  sessionId: string;
+  path: string;
+  /** 1-indexed first line, as `read` describes it. */
+  line?: number | null;
+  limit?: number | null;
+}
+
+export interface AcpWriteTextFileParams {
+  sessionId: string;
+  path: string;
+  content: string;
+}
+
+export interface AcpTerminalEnv {
+  name: string;
+  value: string;
+}
+
+export interface AcpTerminalCreateParams {
+  sessionId: string;
+  command: string;
+  args?: string[] | null;
+  env?: AcpTerminalEnv[] | null;
+  cwd?: string | null;
+  outputByteLimit?: number | null;
+  toolCallId?: string | null;
+}
+
+export interface AcpTerminalRef {
+  sessionId: string;
+  terminalId: string;
+}
+
+export interface AcpReadTextFileResult {
+  content: string;
+}
+
+export interface AcpTerminalCreateResult {
+  terminalId: string;
+}
+
+export interface AcpTerminalWaitResult {
+  exitCode?: number | null;
+  signal?: string | null;
+}
+
+export interface AcpTerminalOutputResult {
+  output: string;
+  truncated?: boolean;
+}
 
 export type JsonRpcId = number | string;
 
@@ -86,10 +155,20 @@ export interface AcpSessionNewResult {
   configOptions?: AcpConfigOption[] | null;
 }
 
+/** What one permission option would grant, as Vibe describes it. */
+export interface AcpPermissionRequirement {
+  scope?: string;
+  invocation_pattern?: string;
+  session_pattern?: string;
+  label?: string;
+}
+
 export interface AcpPermissionOption {
   optionId: string;
   name?: string;
   kind?: string;
+  /** Underscored because that is the wire name; ACP reserves `_meta`. */
+  _meta?: { required_permissions?: AcpPermissionRequirement[] } | null;
 }
 
 export interface AcpToolCallRef {

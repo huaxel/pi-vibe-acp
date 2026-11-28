@@ -267,7 +267,7 @@ test("provider asks UI for permission when interactive and cancels cleanly on ab
   const provider = createVibeProvider({
     pool,
     getCwd: () => dir,
-    getSettings: () => ({}),
+    getSettings: () => ({ permission: "ask" }),
     ui: {
       hasUI: () => true,
       confirm: async (title, message) => {
@@ -291,6 +291,80 @@ test("provider asks UI for permission when interactive and cancels cleanly on ab
   assert.equal(done?.type, "done");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /bash: ls -la/);
+
+  await pool.reset();
+  const report = JSON.parse(readFileSync(reportPath, "utf8"));
+  assert.deepEqual(report.permissionOutcomes, ["selected:allow_once"]);
+}));
+
+test("bridge opt-in does not bypass approval for Vibe-native tools", withTempDir(async (dir) => {
+  const reportPath = join(dir, "report.json");
+  const pool = new VibeSessionPool();
+  const prompts: string[] = [];
+  const provider = createVibeProvider({
+    pool,
+    getCwd: () => dir,
+    getSettings: () => ({ permission: "ask" }),
+    ui: {
+      hasUI: () => true,
+      confirm: async (title, message) => {
+        prompts.push(`${title}: ${message}`);
+        return true;
+      },
+    },
+    args: [FAKE_AGENT, "--report", reportPath],
+  });
+  await provider.auth.apiKey!.resolve({
+    ctx: authCtx({ VIBE_ACP_BIN: process.execPath, PI_VIBE_ACP_CLIENT_TOOLS: "1" }),
+    signal: new AbortController().signal,
+  });
+
+  const system: Message = {
+    role: "system",
+    content: "Use the available tools.",
+    toolsAdded: ["write", "bash"].map((name) => ({ name, description: name, parameters: {} })),
+    timestamp: Date.now(),
+  };
+  const events = await collectEvents(
+    provider.streamSimple!(fakeModel(), transcript([system, userMessage("Run ls")])),
+  );
+  assert.equal(events.at(-1)?.type, "done");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? "", /bash: ls -la/);
+  await pool.reset();
+  const report = JSON.parse(readFileSync(reportPath, "utf8"));
+  assert.deepEqual(report.permissionOutcomes, ["selected:allow_once"]);
+}));
+
+test("default settings answer Vibe's requests with no dialog, like Pi's own tools", withTempDir(async (dir) => {
+  const reportPath = join(dir, "report.json");
+  const pool = new VibeSessionPool();
+  const prompts: string[] = [];
+
+  const provider = createVibeProvider({
+    pool,
+    getCwd: () => dir,
+    getSettings: () => ({}),
+    ui: {
+      hasUI: () => true,
+      confirm: async (title, message) => {
+        prompts.push(`${title}: ${message}`);
+        return true;
+      },
+    },
+    args: [FAKE_AGENT, "--report", reportPath],
+  });
+
+  await provider.auth.apiKey!.resolve({
+    ctx: authCtx({ VIBE_ACP_BIN: process.execPath }),
+    signal: new AbortController().signal,
+  });
+
+  const events = await collectEvents(
+    provider.streamSimple!(fakeModel("fake-one"), transcript([userMessage("Run ls")])),
+  );
+  assert.equal(events.at(-1)?.type, "done");
+  assert.deepEqual(prompts, []);
 
   await pool.reset();
   const report = JSON.parse(readFileSync(reportPath, "utf8"));

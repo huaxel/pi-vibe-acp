@@ -1,17 +1,19 @@
 import {
   createAssistantMessageEventStream,
   createProvider,
-  getCurrentSystemPrompt,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
   type AuthContext,
+  type Message,
   type Model,
   type Provider,
   type ProviderEnv,
   type SimpleStreamOptions,
+  type ToolCall,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import type { AcpClientCapabilities } from "./protocol.js";
 import {
   discoverVibeModels,
   isVibeAcpAvailable,
@@ -23,6 +25,7 @@ import {
 } from "./provider-models.js";
 import { VibeSessionPool } from "./provider-session.js";
 import { previewText } from "./render.js";
+import { buildVibeSystemPrompt } from "./system-prompt.js";
 import { VIBE_PERMISSIONS, type VibePermission } from "./vibe.js";
 
 const PROVIDER_ENV_NAMES = [
@@ -30,6 +33,7 @@ const PROVIDER_ENV_NAMES = [
   "PI_VIBE_ACP_CLIENT_NAME",
   "PI_VIBE_ACP_MODE",
   "PI_VIBE_ACP_PERMISSION",
+  "PI_VIBE_ACP_CLIENT_TOOLS",
 ] as const;
 
 export interface VibeProviderRuntimeSettings {
@@ -87,6 +91,42 @@ function resolveThinkingLevel(
   if (mapped === null) return undefined;
   if (typeof mapped === "string" && mapped) return mapped;
   return reasoning;
+}
+
+/**
+ * The Pi tools this turn can actually run.
+ *
+ * Pi declares tools on system messages and can add or remove them later, so the
+ * live set is the replay of every `toolsAdded`/`toolsRemoved` in order. Reading
+ * it here — rather than assuming a fixed toolset — is what keeps the agent from
+ * delegating work this session has no tool for.
+ */
+export function availableToolNames(messages: readonly Message[]): Set<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "system") continue;
+    for (const tool of message.toolsAdded ?? []) names.add(tool.name);
+    for (const removed of message.toolsRemoved ?? []) names.delete(removed.name);
+  }
+  return names;
+}
+
+/**
+ * Client tools to delegate, limited to what Pi can execute.
+ *
+ * Reads stay with the agent on purpose: Pi's `read` truncates, and content
+ * truncated on the way to the model could be written back over the real file.
+ * Writes and shell commands are the actions with side effects, so those become
+ * Pi tool calls that Pi approves, logs, and renders like any other.
+ */
+export function deriveCapabilities(messages: readonly Message[]): AcpClientCapabilities | undefined {
+  const names = availableToolNames(messages);
+  const capabilities: AcpClientCapabilities = {
+    fs: names.has("write") ? { writeTextFile: true } : undefined,
+    terminal: names.has("bash"),
+  };
+  if (!capabilities.fs && !capabilities.terminal) return undefined;
+  return capabilities;
 }
 
 function emptyUsage(): AssistantMessage["usage"] {
@@ -176,10 +216,24 @@ export function createVibeProvider(deps: CreateVibeProviderOptions): Provider<ty
         const settings = deps.getSettings();
         const hasUI = deps.ui?.hasUI() ?? false;
         const configuredPermission = settings.permission ?? parsePermissionEnv(env.PI_VIBE_ACP_PERMISSION);
-        const permission: VibePermission = configuredPermission ?? (hasUI ? "ask" : "deny");
+        // Same posture as Pi's own tools: no dialog per action. Vibe's policy
+        // (`mode`) decides what needs approval, and `/vibe permission ask`
+        // restores a per-pattern review when you want one.
+        const permission: VibePermission = configuredPermission ?? "approve";
         const mode = settings.mode ?? (env.PI_VIBE_ACP_MODE?.trim() || undefined);
         const thinking = resolveThinkingLevel(model, options);
-        const systemPrompt = getCurrentSystemPrompt(context.messages);
+        // Off by default: advertising a capability changes what the agent is
+        // allowed to hand us, and vibe-acp 3.1.5 never delegates (see README).
+        // Opting in is how a future agent, or a different one, gets Pi's tools.
+        const capabilities =
+          env.PI_VIBE_ACP_CLIENT_TOOLS?.trim() === "1"
+            ? deriveCapabilities(context.messages)
+            : undefined;
+        const delegated = [
+          ...(capabilities?.fs?.writeTextFile ? ["write"] : []),
+          ...(capabilities?.terminal ? ["bash"] : []),
+        ];
+        const systemPrompt = buildVibeSystemPrompt(context.messages, { delegated });
 
         const result = await deps.pool.runTurn({
           cwd: deps.getCwd(),
@@ -189,6 +243,7 @@ export function createVibeProvider(deps: CreateVibeProviderOptions): Provider<ty
           thinking,
           mode,
           permission: permission === "ask" && !hasUI ? "deny" : permission,
+          capabilities,
           command: env.VIBE_ACP_BIN,
           args: deps.args,
           env,
@@ -227,6 +282,45 @@ export function createVibeProvider(deps: CreateVibeProviderOptions): Provider<ty
         });
 
         setStatus(undefined);
+
+        if (result.parks && result.parks.length > 0) {
+          // Vibe asked Pi to act in its place. Emit the calls for real: Pi runs
+          // them with its own permissions and rendering, and the tool results
+          // resume this same Vibe turn on the next request.
+          closeThinking();
+          if (textIndex !== -1) {
+            const block = output.content[textIndex] as { type: "text"; text: string };
+            stream.push({
+              type: "text_end",
+              contentIndex: textIndex,
+              content: block.text,
+              partial: output,
+            });
+          }
+          for (const park of result.parks) {
+            const toolCall: ToolCall = {
+              type: "toolCall",
+              id: park.id,
+              name: park.tool,
+              arguments: park.arguments,
+            };
+            output.content.push(toolCall);
+            const contentIndex = output.content.length - 1;
+            stream.push({ type: "toolcall_start", contentIndex, partial: output });
+            stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+          }
+          if (result.usageDelta) {
+            output.usage.input = result.usageDelta.inputTokens;
+            output.usage.output = result.usageDelta.outputTokens;
+            output.usage.cacheRead = result.usageDelta.cachedReadTokens ?? 0;
+            output.usage.totalTokens = result.usageDelta.totalTokens;
+          }
+          output.stopReason = "toolUse";
+          stream.push({ type: "done", reason: "toolUse", message: output });
+          stream.end();
+          return;
+        }
+
         closeThinking();
 
         if (textIndex !== -1) {

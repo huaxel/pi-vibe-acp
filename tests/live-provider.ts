@@ -1,7 +1,7 @@
 /**
  * Live smoke test for the Pi-native `vibe` provider against the real `vibe-acp`.
  *
- * Spends two minimal Vibe turns, so it is not part of `npm test`:
+ * Spends three minimal Vibe turns, so it is not part of `npm test`:
  *
  *   npm run test:live:provider
  *
@@ -11,17 +11,24 @@
  *      really advertises, without leaving the user's default model changed;
  *   2. a provider turn streams incremental text deltas through Pi's event API
  *      and closes with a `done` event carrying non-zero usage;
- *   3. a second turn in the same transcript reuses the *same* ACP session and
+ *   3. even with Pi tools advertised, Vibe-native actions still honor the
+ *      configured approval prompt (vibe-acp 3.1.5 ignores client tools);
+ *   4. a second turn in the same transcript reuses the *same* ACP session and
  *      bills only the incremental delta, not the whole conversation again.
  */
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   getSupportedThinkingLevels,
   type AssistantMessage,
+  type ThinkingLevel,
   type AssistantMessageEvent,
   type Message,
+  type ToolCall,
+  type ToolResultMessage,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import {
@@ -80,6 +87,48 @@ function textOf(message: AssistantMessage): string {
     .join("");
 }
 
+function systemWithTools(): Message {
+  return {
+    role: "system",
+    content: "Work in the given directory.",
+    toolsAdded: [
+      { name: "write", description: "Write a file", parameters: {} },
+      { name: "bash", description: "Run a shell command", parameters: {} },
+    ],
+    timestamp: Date.now(),
+  };
+}
+
+function toolResultMessage(toolCallId: string, text: string, isError = false): ToolResultMessage {
+  return { role: "toolResult", toolCallId, toolName: "tool", content: [{ type: "text", text }], isError, timestamp: Date.now() };
+}
+
+/**
+ * Stand in for Pi's tool loop: actually perform what the turn asked for, in the
+ * same way Pi's own tools would, so the agent's next turn sees a real result.
+ */
+function performToolCall(call: ToolCall, dir: string): ToolResultMessage {
+  if (call.name === "write") {
+    const path = join(dir, String(call.arguments.path));
+    writeFileSync(path, String(call.arguments.content ?? ""));
+    return toolResultMessage(call.id, `Wrote ${call.arguments.path}`);
+  }
+  if (call.name === "bash") {
+    const result = spawnSync("bash", ["-c", String(call.arguments.command ?? "")], {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    const code = result.status ?? 1;
+    // Same convention as Pi's bash tool, which the bridge parses back.
+    return code === 0
+      ? toolResultMessage(call.id, output)
+      : toolResultMessage(call.id, `${output}\n\nCommand exited with code ${code}`, true);
+  }
+  throw new Error(`unexpected tool call ${call.name}`);
+}
+
 // --- 1. live discovery: no model turn -------------------------------------
 console.log("== discovery (no model turn) ==");
 const discovered = await discoverVibeModels({ cwd: process.cwd() });
@@ -101,7 +150,10 @@ const model: VibeModel | undefined = wanted
 if (!model) fail(`no discovered model matches PI_VIBE_LIVE_MODEL=${wanted}`);
 console.log("using model:", model.id);
 
-// --- 2. two provider turns in an isolated workspace -----------------------
+// --- 2. ensure bridge opt-in does not suppress Vibe-native approval --------
+await verifyNativeApproval(model, getSupportedThinkingLevels(model).find((level) => level !== "off"));
+
+// --- 3. two provider turns in an isolated workspace -----------------------
 const dir = await mkdtemp(join(tmpdir(), "pi-vibe-live-provider-"));
 const pool = new VibeSessionPool();
 const statuses: string[] = [];
@@ -171,6 +223,20 @@ try {
   const sessionAfterTurn1 = pool.getStatus(dir);
   if (!sessionAfterTurn1) fail("turn 1 left no warm session to reuse");
 
+  // --- delegation: only with an explicit opt-in -----------------------------
+  // vibe-acp 3.1.5 never routes file or shell work through an ACP client: its
+  // harness file-system executor is a native constant with no client mode, so
+  // advertising the capability is inert. The path is implemented and covered
+  // offline; this section only runs when the opt-in is set, in its own workspace
+  // because capabilities are fixed at `initialize` and would rebuild the warm
+  // session measured above.
+  if (process.env.PI_VIBE_ACP_CLIENT_TOOLS?.trim() === "1") {
+    console.log("== turn 1b: delegate a write and a command to Pi ==");
+    await verifyDelegation(model, reasoning);
+  } else {
+    console.log("== turn 1b: delegation skipped (set PI_VIBE_ACP_CLIENT_TOOLS=1 to enable) ==");
+  }
+
   console.log("== turn 2/2: same transcript, delta-only prompt ==");
   const turn2: Message[] = [...turn1, message1, userMessage("Reply with exactly: OK2")];
   const startedTurn2 = Date.now();
@@ -206,6 +272,130 @@ try {
   await pool.reset();
   if (pool.getStatus(dir)) fail("pool reset left a warm session behind");
   await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Advertise client tools and check what the agent does with them.
+ *
+ * Runs in its own workspace and session pool: the tool set is negotiated at
+ * `initialize`, so mixing it into the turns above would replace their session.
+ */
+async function verifyNativeApproval(model: VibeModel, reasoning: ThinkingLevel | undefined): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "pi-vibe-live-approval-"));
+  const markerPath = join(dir, "approval-marker");
+  const command = `printf '%s' 'P' >> '${markerPath.replaceAll("'", "'\\''")}'`;
+  const pool = new VibeSessionPool();
+  let prompts = 0;
+  const provider = createVibeProvider({
+    pool,
+    getCwd: () => dir,
+    getSettings: () => ({ mode: "ask", permission: "ask" }),
+    ui: {
+      hasUI: () => true,
+      confirm: async () => {
+        prompts += 1;
+        return true;
+      },
+    },
+  });
+  try {
+    await provider.auth.apiKey!.resolve({
+      ctx: {
+        env: async (name) => name === "PI_VIBE_ACP_CLIENT_TOOLS" ? "1" : process.env[name],
+        fileExists: async () => false,
+      },
+      signal: new AbortController().signal,
+    });
+    const timeout = AbortSignal.timeout(TIMEOUT_MS);
+    const events = await collect(provider.streamSimple!(
+      model,
+      transcript([
+        systemWithTools(),
+        userMessage(`Run this exact shell command twice, sequentially, using the shell tool each time, then stop: ${command}`),
+      ]),
+      { ...(reasoning ? { reasoning } : {}), signal: timeout },
+    ));
+    const message = finish(events, timeout);
+    console.log("== approval with advertised Pi tools ==");
+    console.log("Pi confirmation callbacks:", prompts, "marker:", existsSync(markerPath));
+    if (message.stopReason !== "stop") fail(`approval probe stop reason ${message.stopReason}`);
+    if (prompts !== 1) fail(`expected one session-scoped approval for repeated identical actions, got ${prompts}`);
+    if (readFileSync(markerPath, "utf8") !== "PP") {
+      fail("the approved command did not execute exactly twice");
+    }
+  } finally {
+    await pool.reset();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyDelegation(model: VibeModel, reasoning: ThinkingLevel | undefined): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "pi-vibe-live-delegate-"));
+  const pool = new VibeSessionPool();
+  const provider = createVibeProvider({
+    pool,
+    getCwd: () => dir,
+    getSettings: () => ({ permission: "deny" }),
+    ui: { hasUI: () => false },
+  });
+  try {
+    await provider.auth.apiKey!.resolve({
+      ctx: { env: async (name) => process.env[name], fileExists: async () => false },
+      signal: new AbortController().signal,
+    });
+
+    const messages: Message[] = [
+      systemWithTools(),
+      userMessage(
+        "Create a file named delegated.txt containing exactly the word DELEGATED, then run " +
+          "`wc -c < delegated.txt` and tell me the number it prints. Do not use any other tool.",
+      ),
+    ];
+    const delegatedCalls: ToolCall[] = [];
+    let final: AssistantMessage | undefined;
+    for (let step = 0; step < 6; step += 1) {
+      const timeout = AbortSignal.timeout(TIMEOUT_MS);
+      const events = await collect(
+        provider.streamSimple!(model, transcript(messages), { ...(reasoning ? { reasoning } : {}), signal: timeout }),
+      );
+      const message = finish(events, timeout);
+      if (message.stopReason !== "toolUse") {
+        final = message;
+        break;
+      }
+      const calls = message.content.filter((block): block is ToolCall => block.type === "toolCall");
+      if (calls.length === 0) fail("turn reported toolUse but carried no tool call");
+      messages.push(message);
+      for (const call of calls) {
+        delegatedCalls.push(call);
+        messages.push(performToolCall(call, dir));
+      }
+    }
+
+    const text = final ? textOf(final) : "";
+    console.log("delegated calls:", delegatedCalls.map((call) => `${call.name}(${JSON.stringify(call.arguments)})`).join(", ") || "none");
+    console.log("final text:", JSON.stringify(text.trim().slice(0, 160)));
+    console.log("files:", existsSync(join(dir, "delegated.txt")) ? "delegated.txt written" : "no delegated.txt");
+
+    if (delegatedCalls.length === 0) {
+      // Advertising must be inert: the turn still completes and the agent still
+      // does the work itself. Asserting delegation here would fail this smoke
+      // against every shipping agent.
+      if (!existsSync(join(dir, "delegated.txt"))) fail("the file was never created by either side");
+      if (text.trim().length === 0) fail("an inert advertisement broke the turn's final text");
+      console.log("delegation: advertised but unused by this agent version (harmless)");
+    } else {
+      if (!delegatedCalls.some((call) => call.name === "write")) fail("no write was delegated to Pi");
+      if (!delegatedCalls.some((call) => call.name === "bash")) fail("no command was delegated to Pi");
+      if (readFileSync(join(dir, "delegated.txt"), "utf8").trim() !== "DELEGATED") {
+        fail("the delegated write stored the wrong content");
+      }
+      console.log("delegation: active");
+    }
+  } finally {
+    await pool.reset();
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 console.log("live provider smoke ok");

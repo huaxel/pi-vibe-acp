@@ -15,12 +15,14 @@ export type FakeBehavior =
   | "ask-always"
   | "ask-always-only"
   | "ask-permanent-only"
+  | "ask-path"
   | "ask-unknown-tool"
   | "modes-only"
   | "hang-init"
   | "ignore-cancel"
   | "usage-partial"
   | "config-stale"
+  | "client-tools"
   | "no-close";
 
 export interface FakeAgent {
@@ -50,6 +52,14 @@ export interface FakeReport {
   cancelReceived: boolean;
   closeSession: boolean;
   unexpectedClientMethods: Array<{ method: string; error?: { code?: number } | null }>;
+  /** Client tools this client advertised at initialize. */
+  clientCapabilities: Record<string, unknown> | null;
+  /** Answers this client gave to the agent's fs and terminal requests. */
+  clientToolResults: Array<{
+    method: string;
+    result?: Record<string, unknown> | null;
+    error?: { code?: number; message?: string } | null;
+  }>;
 }
 
 export function fakeAgent(behavior: FakeBehavior = "normal"): FakeAgent {

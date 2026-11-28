@@ -55,7 +55,8 @@ const vibeParameters = Type.Object({
   permission: Type.Optional(
     StringEnum(VIBE_PERMISSIONS, {
       description:
-        "How to answer Vibe's tool-permission requests: deny (default), ask (interactive), or approve. " +
+        "How to answer Vibe's tool-permission requests: approve (default, no dialog), " +
+        "ask (one dialog per action pattern, needs a UI), or deny. " +
         "This does not restrict tools Vibe's own policy runs without asking.",
     }),
   ),
@@ -124,7 +125,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use vibe when the user asks for Mistral Vibe specifically, or when a task should run in Vibe's own agent loop instead of this session's tools.",
       "Give vibe a self-contained prompt: it cannot see this conversation, and it edits the working tree itself.",
-      "Permission only governs requests sent to Pi, not actions Vibe approves itself. Use mode \"ask\" for permission prompts; do not assume deny is a read-only sandbox.",
+      "Permission only governs requests sent to Pi, not actions Vibe approves itself. Approve is the default; use permission \"ask\" when the user wants a dialog per action pattern, and do not assume deny is a read-only sandbox.",
       "Read vibe's token counts from its details, not as this session's usage; those tokens are billed to Vibe.",
     ],
     parameters: vibeParameters,
@@ -133,7 +134,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const input = params as VibeParams;
       const cwd = resolveCwd(input.cwd, ctx.cwd);
-      const permission = input.permission ?? "deny";
+      const permission = input.permission ?? "approve";
       const timeoutSeconds = clampSeconds(input.timeoutSeconds);
 
       const base: VibeToolDetails = {
@@ -303,7 +304,7 @@ export default function (pi: ExtensionAPI) {
         let next = value;
         if (!next && ctx.hasUI) {
           const picked = await ctx.ui.select("Vibe provider permission policy", [
-            "default (ask in UI, deny headless)",
+            "default (approve)",
             ...VIBE_PERMISSIONS,
           ]);
           if (!picked) return;
@@ -311,14 +312,14 @@ export default function (pi: ExtensionAPI) {
         }
         if (!next) {
           ctx.ui.notify(
-            `vibe permission: ${providerSettings.permission ?? "default (ask in UI, deny headless)"}`,
+            `vibe permission: ${providerSettings.permission ?? "default (approve)"}`,
             "info",
           );
           return;
         }
         if (next === "default") {
           providerSettings.permission = undefined;
-          ctx.ui.notify("vibe permission: reset to default (ask in UI, deny headless)", "info");
+          ctx.ui.notify("vibe permission: reset to default (approve)", "info");
           return;
         }
         if (!VIBE_PERMISSIONS.includes(next as VibePermission)) {
@@ -344,7 +345,7 @@ export default function (pi: ExtensionAPI) {
           `agent: ${doctor.agent?.name ?? "unknown"} ${doctor.agent?.version ?? ""}`.trim(),
           `protocol: v${doctor.protocolVersion}`,
           `auth: ${doctor.authMethods.length ? doctor.authMethods.join(", ") : "none advertised"}`,
-          `provider mode: ${providerSettings.mode ?? "default"} · permission: ${providerSettings.permission ?? (ctx.hasUI ? "ask (default)" : "deny (default)")}`,
+          `provider mode: ${providerSettings.mode ?? "default"} · permission: ${providerSettings.permission ?? "approve (default)"}`,
           warm
             ? `warm session: ${warm.sessionId} (${[warm.applied.model, warm.applied.mode, warm.applied.thinking].filter(Boolean).join(" / ") || "active"})`
             : "warm session: none",

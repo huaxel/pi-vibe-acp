@@ -1,6 +1,6 @@
 {
   "name": "@juanbenjumea/pi-vibe-acp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Mistral Vibe for Pi: Vibe's models in Pi's /model picker over ACP (vibe-acp), plus a delegation tool, with streaming, permission control, and token accounting.",
   "type": "module",
   "license": "MIT",

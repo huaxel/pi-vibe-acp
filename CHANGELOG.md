@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.0] - 2026-11-28
+
+- Stop opening a permission dialog for every action Vibe takes. Provider turns
+  now default to `permission: "approve"`, matching Pi's own posture: Pi does not
+  ask before each tool call, so a Vibe turn does not either. `deny` remains
+  available, and `ask` keeps a dialog per pattern.
+- `permission: "ask"` now takes the session-scoped grant the dialog names, so
+  approving an action stops the identical request from returning on the next
+  turn, and the dialog shows the requirement Vibe only describes in option
+  metadata (`outside workdir (/etc/hostname)`).
+- Add an opt-in ACP client-tool bridge (`PI_VIBE_ACP_CLIENT_TOOLS=1`): an agent
+  that delegates writes and shell commands runs them through Pi's `write` and
+  `bash` tools, with Pi's approvals and rendering, and the parked request is
+  answered from Pi's real result. `vibe-acp` 3.1.5 never delegates, so the flag
+  is off by default and inert there; it is covered offline against a fake agent.
+  Vibe-native permission requests still obey the configured policy, even with
+  the bridge opted in. A malformed write fails instead of reporting a write that
+  never happened, truncated command output is reported as truncated rather than
+  passed off as the whole result, and the terminal table is bounded.
+- Stop forwarding Pi's tool inventory to Vibe. The provider used to send Pi's
+  whole system prompt, whose `<tools>` and `<mcp_servers>` sections list Pi
+  tools (`read`, `bash`, `edit`, `agy_*`, codemode) and their rules. Vibe has
+  none of those, so the model was described a harness it was not in and its own
+  tools went unmentioned. The `rules` section (how to call those tools) and the
+  `docs` index (Pi's own documentation) are dropped for the same reason;
+  `preamble`, `cwd`, `skills`, and `project_context` still reach Vibe. Project instructions, skills, and cwd still apply, and
+  a `<pi_acp_runtime>` note now states that Pi supplies no tools and only shows
+  the reply.
+
 ## [0.2.0] - 2026-11-28
 
 Mistral Vibe is now a Pi model provider as well as a delegation tool: with

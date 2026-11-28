@@ -3,6 +3,7 @@ import {
   AGENT_METHODS,
   CLIENT_METHODS,
   PROTOCOL_VERSION,
+  type AcpClientCapabilities,
   type AcpConfigOption,
   type AcpImplementation,
   type AcpInitializeResult,
@@ -62,6 +63,35 @@ export type PermissionHandler = (
   request: AcpPermissionRequest,
 ) => AcpPermissionOutcome | Promise<AcpPermissionOutcome>;
 
+/**
+ * A client-tool request the handler chose to answer later.
+ *
+ * ACP lets a response arrive after the request, so an agent waiting on it just
+ * keeps waiting. That is what makes delegation possible: the agent's file or
+ * shell work can be turned into a Pi tool call, and the answer only written once
+ * Pi has actually run it. Settling twice is a no-op, and settling after the
+ * connection closed is dropped, so a racing teardown cannot corrupt the stream.
+ */
+export interface DeferredClientRequest {
+  readonly id: JsonRpcId;
+  readonly method: string;
+  settle(result: unknown): void;
+  fail(message: string, code?: number): void;
+}
+
+/** What `onClientTool` returns: an answer now, or ownership taken for later. */
+export type ClientToolOutcome =
+  | { result: unknown }
+  | { error: { code: number; message: string } }
+  | "deferred"
+  | undefined;
+
+export type ClientToolHandler = (request: {
+  method: string;
+  params: unknown;
+  deferred: DeferredClientRequest;
+}) => ClientToolOutcome | Promise<ClientToolOutcome>;
+
 export interface AcpClientOptions {
   /** Binary to run. Defaults to `vibe-acp`. */
   command?: string;
@@ -74,6 +104,13 @@ export interface AcpClientOptions {
   abortGraceMs?: number;
   onSessionUpdate?: (sessionId: string, update: AcpSessionUpdate) => void;
   onPermissionRequest?: PermissionHandler;
+  /**
+   * Client tools to advertise. Omit to advertise none, which makes the agent do
+   * its own file and shell work with its own tools.
+   */
+  capabilities?: AcpClientCapabilities;
+  /** Handles the client-tool requests made possible by `capabilities`. */
+  onClientTool?: ClientToolHandler;
   onStderr?: (chunk: string) => void;
 }
 
@@ -109,6 +146,12 @@ export class AcpClient {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
+  /**
+   * Client-tool requests handed to `onClientTool` as deferred. Tracked so a
+   * second settle is a no-op and teardown can fail them instead of leaving an
+   * agent waiting on an answer that will never come.
+   */
+  private readonly deferred = new Map<JsonRpcId, { method: string }>();
   private readonly exitPromise: Promise<void>;
   private buffer = "";
   private stderrTail = "";
@@ -176,13 +219,31 @@ export class AcpClient {
       AGENT_METHODS.initialize,
       {
         protocolVersion: PROTOCOL_VERSION,
-        // No filesystem, terminal, or MCP capabilities: the agent uses its own
-        // tools and must never route work through this client.
-        clientCapabilities: {},
+        clientCapabilities: this.describeCapabilities(),
         clientInfo,
       },
       options,
     );
+  }
+
+  /**
+   * The `clientCapabilities` block, holding only what this client can serve.
+   *
+   * Agents gate delegation on these flags, so advertising a capability without
+   * a handler would hand the agent work this client cannot do. Keys are omitted
+   * rather than sent as `false` when nothing is advertised: an empty object is
+   * what "uses its own tools" looks like on the wire.
+   */
+  private describeCapabilities(): Record<string, unknown> {
+    const capabilities = this.options.capabilities;
+    if (!capabilities) return {};
+    const fs: Record<string, boolean> = {};
+    if (capabilities.fs?.readTextFile) fs.readTextFile = true;
+    if (capabilities.fs?.writeTextFile) fs.writeTextFile = true;
+    const described: Record<string, unknown> = {};
+    if (Object.keys(fs).length > 0) described.fs = fs;
+    if (capabilities.terminal) described.terminal = true;
+    return described;
   }
 
   async newSession(
@@ -457,10 +518,73 @@ export class AcpClient {
       return;
     }
 
-    // No filesystem, terminal, elicitation, or MCP capabilities were advertised,
-    // so a well-behaved agent never asks. Refusing keeps a misbehaving one from
-    // borrowing this client's authority.
+    if (isClientToolMethod(method)) {
+      await this.onClientToolRequest(id, method, params);
+      return;
+    }
+
+    // Elicitation and MCP were not advertised, so a well-behaved agent never
+    // asks. Refusing keeps a misbehaving one from borrowing this client's
+    // authority.
     this.respondError(id, -32601, `${method} is not supported by this client`);
+  }
+
+  private async onClientToolRequest(
+    id: JsonRpcId,
+    method: string,
+    params: unknown,
+  ): Promise<void> {
+    const handler = this.options.onClientTool;
+    if (!handler) {
+      this.respondError(id, -32601, `${method} is not supported by this client`);
+      return;
+    }
+
+    // Register before calling the handler: it may settle synchronously, and a
+    // late settle after teardown must be a no-op rather than a write to a dead pipe.
+    this.deferred.set(id, { method });
+    const request: DeferredClientRequest = {
+      id,
+      method,
+      settle: (result) => {
+        if (!this.takeDeferred(id)) return;
+        this.respond(id, result);
+      },
+      fail: (message, code = -32603) => {
+        if (!this.takeDeferred(id)) return;
+        this.respondError(id, code, message);
+      },
+    };
+
+    let outcome: ClientToolOutcome;
+    try {
+      outcome = await handler({ method, params, deferred: request });
+    } catch (error) {
+      // A throwing handler is a bug, not an instruction to hang the agent.
+      request.fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
+
+    // Ownership taken for later: the handler answers through `deferred`.
+    if (outcome === "deferred") return;
+    if (!this.takeDeferred(id)) {
+      // Already settled through `deferred`, so a return value is redundant.
+      return;
+    }
+    if (!outcome) {
+      this.respondError(id, -32601, `${method} is not supported by this client`);
+      return;
+    }
+    if ("error" in outcome) {
+      this.respondError(id, outcome.error.code, outcome.error.message);
+      return;
+    }
+    this.respond(id, outcome.result);
+  }
+
+  /** Removes a deferred request, reporting whether the caller now owns it. */
+  private takeDeferred(id: JsonRpcId): boolean {
+    return this.deferred.delete(id);
   }
 
   private respond(id: JsonRpcId, result: unknown): void {
@@ -496,7 +620,22 @@ export class AcpClient {
       this.clearPending(id, pending);
       pending.reject(error);
     }
+    // Drop deferred requests: the agent is gone, so nothing can consume an
+    // answer, and a late settle must not write to a closed pipe.
+    this.deferred.clear();
   }
+}
+
+function isClientToolMethod(method: string): boolean {
+  return (
+    method === CLIENT_METHODS.fsReadTextFile ||
+    method === CLIENT_METHODS.fsWriteTextFile ||
+    method === CLIENT_METHODS.terminalCreate ||
+    method === CLIENT_METHODS.terminalOutput ||
+    method === CLIENT_METHODS.terminalWaitForExit ||
+    method === CLIENT_METHODS.terminalKill ||
+    method === CLIENT_METHODS.terminalRelease
+  );
 }
 
 function keepTail(text: string, limit: number): string {
