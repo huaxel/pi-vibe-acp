@@ -14,11 +14,17 @@ import {
 test("renders the Pi error flag and diagnostic when tool details are missing", () => {
   type Renderer = NonNullable<Parameters<ExtensionAPI["registerTool"]>[0]["renderResult"]>;
   let render: Renderer | undefined;
-  const host: Pick<ExtensionAPI, "registerTool" | "registerCommand"> = {
+  let registeredProviderId: string | undefined;
+  const host: Pick<ExtensionAPI, "on" | "registerProvider" | "registerTool" | "registerCommand"> = {
+    on: (() => () => undefined) as ExtensionAPI["on"],
+    registerProvider: ((provider: { id?: string } | string) => {
+      registeredProviderId = typeof provider === "string" ? provider : provider.id;
+    }) as ExtensionAPI["registerProvider"],
     registerTool: (definition) => { render = definition.renderResult as Renderer | undefined; },
     registerCommand: () => undefined,
   };
   extension(host as ExtensionAPI);
+  assert.equal(registeredProviderId, "vibe");
   assert.ok(render);
   const theme = { fg: (_color: string, value: string) => value } as Theme;
   const output = render(

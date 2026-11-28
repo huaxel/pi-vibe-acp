@@ -23,11 +23,14 @@ const report = {
   methods: [],
   initialize: null,
   newSession: null,
+  prompts: [],
   configOptions: [],
   modes: [],
   permissionOutcomes: [],
   cancelReceived: false,
   closeSession: false,
+  /** Prompts that arrived while another prompt was still pending. */
+  overlaps: 0,
   unexpectedClientMethods: [],
 };
 
@@ -73,6 +76,7 @@ let pendingPromptSession = null;
 let permissionSequence = 0;
 let pendingPermission = null;
 let slowTimer = null;
+let turnCount = 0;
 const outboundRequests = new Map();
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -147,6 +151,64 @@ function finishTurn(promptId, sessionId) {
 
 function handlePrompt(message) {
   const sessionId = message.params?.sessionId ?? "fake-session";
+  const promptText = (message.params?.prompt ?? [])
+    .map((block) => (block?.type === "text" ? block.text : ""))
+    .join("");
+  report.prompts.push(promptText);
+  turnCount += 1;
+
+  if (behavior === "provider-multi") {
+    update(sessionId, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: `thinking turn ${turnCount}` },
+    });
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: `tool-${turnCount}`,
+      title: `read: file-${turnCount}.ts`,
+      kind: "read",
+      status: "completed",
+    });
+    update(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: `reply ${turnCount}: ${promptText}` },
+    });
+    // Session-cumulative usage grows each turn so tests can verify delta accounting.
+    const inputTokens = 100 * turnCount;
+    const outputTokens = 25 * turnCount;
+    const totalTokens = inputTokens + outputTokens;
+    update(sessionId, {
+      sessionUpdate: "usage_update",
+      _meta: { promptTokens: inputTokens, completionTokens: outputTokens, cachedTokens: 10 * turnCount, totalTokens },
+    });
+    respond(message.id, {
+      stopReason: "end_turn",
+      usage: { inputTokens, outputTokens, cachedReadTokens: 10 * turnCount, totalTokens },
+    });
+    return;
+  }
+
+  if (behavior === "provider-overlap") {
+    // Answers after a short delay so two turns issued at once really overlap if
+    // the client lets them; `overlaps` records that the client did not serialize.
+    if (pendingPromptId !== null) report.overlaps += 1;
+    pendingPromptId = message.id;
+    pendingPromptSession = sessionId;
+    const replyText = `reply ${turnCount}: ${promptText}`;
+    slowTimer = setTimeout(() => {
+      update(sessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: replyText },
+      });
+      respond(message.id, {
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      });
+      pendingPromptId = null;
+      pendingPromptSession = null;
+    }, 80);
+    return;
+  }
 
   if (behavior === "exit-mid") {
     process.stderr.write("fake agent exploded before answering\n");

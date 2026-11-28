@@ -1,7 +1,7 @@
 {
   "name": "@juanbenjumea/pi-vibe-acp",
-  "version": "0.1.1",
-  "description": "Mistral Vibe delegation for Pi: run Vibe's own agent over ACP (vibe-acp) from a tool, with streaming, permission control, and token accounting.",
+  "version": "0.2.0",
+  "description": "Mistral Vibe for Pi: Vibe's models in Pi's /model picker over ACP (vibe-acp), plus a delegation tool, with streaming, permission control, and token accounting.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
@@ -13,7 +13,8 @@
     "vibe-acp",
     "acp",
     "agent-client-protocol",
-    "delegation"
+    "delegation",
+    "model-provider"
   ],
   "engines": {
     "node": ">=22.18.0"
@@ -24,6 +25,7 @@
     "pack:check": "npm pack --dry-run --json",
     "gate": "npm run typecheck && npm test && npm run pack:check",
     "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts",
+    "test:live:provider": "node --import ./tests/resolve-hook.mjs tests/live-provider.ts",
     "prepublishOnly": "npm run gate"
   },
   "files": [

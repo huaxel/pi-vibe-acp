@@ -1,8 +1,13 @@
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  createVibeProvider,
+  type VibeProviderRuntimeSettings,
+} from "./lib/provider.js";
+import { VibeSessionPool } from "./lib/provider-session.js";
 import {
   formatDuration,
   formatUsage,
@@ -16,10 +21,12 @@ import {
   stripAnsi,
   VIBE_PERMISSIONS,
   VibeAcpError,
+  type VibePermission,
   type VibeRunResult,
 } from "./lib/vibe.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 900;
+const VIBE_MODES = ["ask", "accept-edits", "smart-approve", "auto-approve"] as const;
 
 const vibeParameters = Type.Object({
   prompt: Type.String({
@@ -72,6 +79,39 @@ type VibeParams = {
 };
 
 export default function (pi: ExtensionAPI) {
+  const pool = new VibeSessionPool();
+  const providerSettings: VibeProviderRuntimeSettings = {};
+  let activeCwd = process.cwd();
+  let activeUi: ExtensionUIContext | undefined;
+  let activeHasUI = false;
+
+  pi.on("session_start", async (_event, ctx) => {
+    activeCwd = ctx.cwd;
+    activeUi = ctx.ui;
+    activeHasUI = ctx.hasUI;
+    await pool.reset();
+  });
+
+  pi.on("session_shutdown", async () => {
+    activeUi = undefined;
+    activeHasUI = false;
+    await pool.reset();
+  });
+
+  pi.registerProvider(
+    createVibeProvider({
+      pool,
+      getCwd: () => activeCwd,
+      getSettings: () => providerSettings,
+      ui: {
+        hasUI: () => activeHasUI,
+        confirm: (title, message, opts) =>
+          activeUi ? activeUi.confirm(title, message, opts) : Promise.resolve(false),
+        setStatus: (key, text) => activeUi?.setStatus(key, text),
+      },
+    }),
+  );
+
   pi.registerTool({
     name: "vibe",
     label: "Mistral Vibe",
@@ -215,18 +255,99 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("vibe", {
-    description: "Report the Mistral Vibe ACP agent's version, auth methods, and session options",
-    handler: async (_args, ctx) => {
+    description: "Inspect Vibe ACP status, or configure provider mode, permission, or session reset",
+    handler: async (args, ctx) => {
+      activeCwd = ctx.cwd;
+      activeUi = ctx.ui;
+      activeHasUI = ctx.hasUI;
+
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const subcommand = parts[0]?.toLowerCase();
+      const value = parts[1];
+
+      if (subcommand === "reset") {
+        await pool.reset(ctx.cwd);
+        ctx.ui.notify("vibe: warm ACP session reset for this workspace", "info");
+        return;
+      }
+
+      if (subcommand === "mode") {
+        let next = value;
+        if (!next && ctx.hasUI) {
+          const picked = await ctx.ui.select("Vibe provider approval mode", [
+            "default (Vibe's config)",
+            ...VIBE_MODES,
+          ]);
+          if (!picked) return;
+          next = picked.startsWith("default") ? "default" : picked;
+        }
+        if (!next) {
+          ctx.ui.notify(`vibe mode: ${providerSettings.mode ?? "default (Vibe's config)"}`, "info");
+          return;
+        }
+        if (next === "default") {
+          providerSettings.mode = undefined;
+          ctx.ui.notify("vibe mode: reset to Vibe's default config", "info");
+          return;
+        }
+        if (!VIBE_MODES.includes(next as (typeof VIBE_MODES)[number])) {
+          ctx.ui.notify(`vibe: unknown mode "${next}" (expected: ${VIBE_MODES.join(", ")}, or default)`, "error");
+          return;
+        }
+        providerSettings.mode = next;
+        ctx.ui.notify(`vibe mode: ${next}`, "info");
+        return;
+      }
+
+      if (subcommand === "permission") {
+        let next = value;
+        if (!next && ctx.hasUI) {
+          const picked = await ctx.ui.select("Vibe provider permission policy", [
+            "default (ask in UI, deny headless)",
+            ...VIBE_PERMISSIONS,
+          ]);
+          if (!picked) return;
+          next = picked.startsWith("default") ? "default" : picked;
+        }
+        if (!next) {
+          ctx.ui.notify(
+            `vibe permission: ${providerSettings.permission ?? "default (ask in UI, deny headless)"}`,
+            "info",
+          );
+          return;
+        }
+        if (next === "default") {
+          providerSettings.permission = undefined;
+          ctx.ui.notify("vibe permission: reset to default (ask in UI, deny headless)", "info");
+          return;
+        }
+        if (!VIBE_PERMISSIONS.includes(next as VibePermission)) {
+          ctx.ui.notify(
+            `vibe: unknown permission "${next}" (expected: ${VIBE_PERMISSIONS.join(", ")}, or default)`,
+            "error",
+          );
+          return;
+        }
+        providerSettings.permission = next as VibePermission;
+        ctx.ui.notify(`vibe permission: ${next}`, "info");
+        return;
+      }
+
       try {
         const doctor = await readVibeDoctor({
           cwd: ctx.cwd,
           command: process.env.VIBE_ACP_BIN,
           clientName: process.env.PI_VIBE_ACP_CLIENT_NAME ?? "pi",
         });
+        const warm = pool.getStatus(ctx.cwd);
         const lines = [
           `agent: ${doctor.agent?.name ?? "unknown"} ${doctor.agent?.version ?? ""}`.trim(),
           `protocol: v${doctor.protocolVersion}`,
           `auth: ${doctor.authMethods.length ? doctor.authMethods.join(", ") : "none advertised"}`,
+          `provider mode: ${providerSettings.mode ?? "default"} · permission: ${providerSettings.permission ?? (ctx.hasUI ? "ask (default)" : "deny (default)")}`,
+          warm
+            ? `warm session: ${warm.sessionId} (${[warm.applied.model, warm.applied.mode, warm.applied.thinking].filter(Boolean).join(" / ") || "active"})`
+            : "warm session: none",
         ];
         for (const option of doctor.configOptions) {
           const values = option.options?.map((choice) => choice.value) ?? [];

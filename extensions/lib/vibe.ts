@@ -313,7 +313,7 @@ export async function readVibeDoctor(
 }
 
 /** A missing cwd makes spawn fail with ENOENT, which reads as a missing binary. */
-function assertDirectory(cwd: string): void {
+export function assertDirectory(cwd: string): void {
   try {
     if (statSync(cwd).isDirectory()) return;
   } catch {
@@ -349,7 +349,7 @@ function createClient(
   });
 }
 
-async function decidePermission(
+export async function decidePermission(
   request: AcpPermissionRequest,
   permission: VibePermission,
   confirm: VibeRunOptions["confirm"],
@@ -388,7 +388,7 @@ async function decidePermission(
     : { outcome: "cancelled" };
 }
 
-async function applyConfig(
+export async function applyConfig(
   client: AcpClient,
   session: AcpSessionNewResult,
   wanted: { mode?: string; model?: string; thinking?: string },
@@ -448,7 +448,7 @@ async function applyConfig(
  * session-cumulative, so the newest per-side counts win; fields a report omits
  * keep their last value, and the total never shrinks.
  */
-function mergeUsage(
+export function mergeUsage(
   previous: AcpUsage | undefined,
   next: {
     inputTokens?: number;
@@ -481,7 +481,7 @@ export class VibeAcpError extends Error {
   }
 }
 
-function explainTurnError(error: unknown, authMethodCount: number): Error {
+export function explainTurnError(error: unknown, authMethodCount: number): Error {
   if (error instanceof VibeAcpError) return error;
   if (error instanceof AcpTimeoutError) {
     return new VibeAcpError(

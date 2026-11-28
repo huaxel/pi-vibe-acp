@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.0] - 2026-11-28
+
+Mistral Vibe is now a Pi model provider as well as a delegation tool: with
+`vibe-acp` installed, `vibe/*` models show up in `/model` and behave like any
+other Pi model.
+
+- Mistral Vibe models appear in `/model` with per-model thinking levels
+  discovered live over ACP, `agent_thought_chunk`/`agent_message_chunk`
+  streamed as Pi thinking and text deltas, live tool activity in the status
+  bar, and Pi confirmation dialogs for Vibe's permission requests.
+- Consecutive turns in one Pi conversation reuse the warm `vibe-acp` session
+  and send only the incremental prompt delta; a branch switch, compaction, or
+  `/vibe reset` starts a fresh session. Per-turn token counts are subtracted
+  from Vibe's session-cumulative usage so Pi reports this turn, not the session.
+- Concurrent turns in one workspace are serialized. One ACP session cannot take
+  two prompts at once, so an unserialized pair lost one turn's updates and then
+  hung waiting for a reply that could never arrive.
+- Discovery probes each model's thinking levels on a scratch session and then
+  restores the user's own model, so listing models never edits
+  `~/.vibe/config.toml`; closing a warm session likewise restores the model and
+  thinking level that were persisted before it, so a Pi session on `vibe/*`
+  does not permanently change the `vibe` CLI default.
+- Thinking is only sent to Vibe when Pi picked a level, so a turn without an
+  explicit level no longer resets the user's persisted choice to `off`.
+- `/vibe` gains `mode`, `permission`, and `reset` subcommands; bare `/vibe`
+  still prints the doctor report, now including warm session status.
+- `npm run test:live:provider` adds a two-turn live check of the provider path:
+  incremental deltas and, on the second turn, the same ACP session billed only
+  the delta rather than a replayed transcript.
+
 ## [0.1.1] - 2026-11-27
 
 - Clarify that client permission policy only affects requests Vibe sends to Pi.

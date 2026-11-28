@@ -1,0 +1,134 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Publishing a version is irreversible, so serialize release runs instead of
+# letting two dispatches race the republish guard.
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Mutable major tags are not acceptable in a job that can mint npm tokens:
+      # a compromised tag runs before the OIDC exchange. Both actions are pinned
+      # to the reviewed v6 commits.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run pack:check
+      # The published tarball comes from the committed tree, so an uncommitted
+      # change that the gate depends on would ship something unreviewed.
+      - run: git diff --exit-code
+      - name: Dependency advisories (high or critical block)
+        run: npm audit --audit-level=high
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      # Mutable major tags are not acceptable in a job that can mint npm tokens:
+      # a compromised tag runs before the OIDC exchange. Both actions are pinned
+      # to the reviewed v6 commits.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Refuse to republish an existing version
+        run: |
+          set -euo pipefail
+          PACKAGE=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          ENCODED=$(node -p "encodeURIComponent(require('./package.json').name)")
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/$ENCODED/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            echo "::error::$PACKAGE@$VERSION already exists on npm; bump the version before publishing."
+            exit 1
+          fi
+          if [ "$CODE" != "404" ]; then
+            echo "::error::Registry lookup for $PACKAGE@$VERSION returned HTTP $CODE; refusing to publish."
+            exit 1
+          fi
+          echo "$PACKAGE@$VERSION is unpublished; proceeding."
+      # Trusted publishing: no npm token is stored anywhere. The registry issues
+      # a short-lived token in exchange for this workflow's GitHub OIDC identity,
+      # which must be configured as a trusted publisher on npmjs.com for this
+      # package (owner juanbenjumea, repository pi-vibe-acp, workflow publish.yml).
+      - name: Exchange GitHub OIDC token for an npm token
+        id: npm-token
+        run: |
+          set -euo pipefail
+          ID_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | jq -r '.value')
+          PKG=$(node -p "encodeURIComponent(require('./package.json').name)")
+          RESPONSE=$(curl -sS -X POST -H "Authorization: Bearer $ID_TOKEN" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$PKG")
+          echo "$RESPONSE" | jq -e '.token' >/dev/null || { echo "Token exchange failed: $RESPONSE"; exit 1; }
+          NPM_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          echo "::add-mask::$NPM_TOKEN"
+          echo "token=$NPM_TOKEN" >> "$GITHUB_OUTPUT"
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.npm-token.outputs.token }}
+      # npm reports success before the tarball is downloadable: metadata and
+      # dist-tags commit first, and `latest` then points at a 404 for a few
+      # minutes, which breaks a bare `npm install` for everyone. Poll the
+      # artifact the registry itself names instead of inferring a filename.
+      - name: Verify the published artifact is installable
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          ENCODED=$(node -e "process.stdout.write(encodeURIComponent(process.argv[1]))" "$PKG")
+          echo "waiting for ${PKG}@${VER} to become downloadable"
+          deadline=$((SECONDS + 900))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            manifest=$(curl -fsS "https://registry.npmjs.org/${ENCODED}/${VER}" || true)
+            tarball=$(printf '%s' "$manifest" | jq -r '.dist.tarball // empty')
+            if [ -n "$tarball" ]; then
+              code=$(curl -s -o /tmp/artifact.tgz -w '%{http_code}' "$tarball")
+              if [ "$code" = "200" ]; then
+                tar tzf /tmp/artifact.tgz > /dev/null
+                inner=$(tar xzOf /tmp/artifact.tgz package/package.json | jq -r '.version')
+                if [ "$inner" != "$VER" ]; then
+                  echo "::error::tarball reports version ${inner}, expected ${VER}"
+                  exit 1
+                fi
+                for file in extensions/index.ts extensions/lib/provider.ts extensions/lib/provider-models.ts extensions/lib/provider-session.ts; do
+                  tar tzf /tmp/artifact.tgz "package/$file" > /dev/null || {
+                    echo "::error::tarball is missing $file"
+                    exit 1
+                  }
+                done
+                echo "artifact verified: ${tarball} (${VER})"
+                exit 0
+              fi
+              echo "tarball returned ${code}; retrying"
+            else
+              echo "manifest has no tarball yet; retrying"
+            fi
+            sleep 15
+          done
+          echo "::error::${PKG}@${VER} never became downloadable; the 'latest' tag points at a missing artifact"
+          exit 1

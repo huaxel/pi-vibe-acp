@@ -55,7 +55,10 @@ direction obvious even for a single turn (~12–13k input tokens).
    (the panel shows EUR used against each limit).
 2. **Run one sized turn** through this extension, then read
    `details.usage.totalTokens` from the tool result. For a larger signal, run
-   several turns; the token count is reported per call.
+   several turns; the token count is reported per call. Provider turns
+   (`/model` → `vibe/*`) go through the same ACP session, but their counts land
+   in Pi's own usage field as the per-turn delta, so read those from Pi's usage
+   footer rather than from a tool result.
 3. **Re-read the dashboard** after it settles (minutes, occasionally longer).
    The Vibe balance should have moved by roughly that run's cost. An API-balance
    move means the classification changed and the workflow now has ~1/10 of the
