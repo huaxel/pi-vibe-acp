@@ -73,8 +73,10 @@ jobs:
           echo "$PACKAGE@$VERSION is unpublished; proceeding."
       # Trusted publishing: no npm token is stored anywhere. The registry issues
       # a short-lived token in exchange for this workflow's GitHub OIDC identity,
-      # which must be configured as a trusted publisher on npmjs.com for this
-      # package (owner juanbenjumea, repository pi-vibe-acp, workflow publish.yml).
+      # which is configured as a trusted publisher on npmjs.com for this package
+      # (GitHub repository huaxel/pi-vibe-acp, workflow publish.yml; the npm scope
+      # stays @juanbenjumea). The first publish after a config change also
+      # validates the trust, which npm shows as pending until then.
       - name: Exchange GitHub OIDC token for an npm token
         id: npm-token
         run: |

@@ -231,5 +231,7 @@ git push origin main --follow-tags
 ```
 
 Trusted publishing must be configured once on npmjs.com for this package
-(owner `juanbenjumea`, repository `pi-vibe-acp`, workflow `publish.yml`), or the
-OIDC token exchange in `publish.yml` fails with a token-exchange error.
+(GitHub repository `huaxel/pi-vibe-acp`, workflow `publish.yml`; the npm scope
+stays `@juanbenjumea`), or the OIDC token exchange in `publish.yml` fails with a
+token-exchange error. The first publish after adding or editing the
+configuration also validates it — npm shows the trust as pending until then.
